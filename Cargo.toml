@@ -4,3 +4,10 @@ version = "0.1.0"
 authors = ["William Speirs <bill.speirs@gmail.com>"]
 
 [dependencies]
+byteorder = "1.2"
+log = "0.4"
+num_cpus = "1.0"
+positioned-io = "0.2.2"
+
+[patch.crates-io]
+positioned-io = { path = "/home/wspeirs/src/positioned-io" }
