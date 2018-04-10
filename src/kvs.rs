@@ -30,12 +30,30 @@ impl KVS {
         })
     }
 
-    pub fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
+    /// Attempts to read a value for a given key from the SSTables on disk
+    fn get_from_disk(&mut self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, IOError> {
+        Ok(None)
+    }
+
+    pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
         None
     }
 
-    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
-        None
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<Option<Vec<u8>>, IOError> {
+        // append the key & value to the log file
+        self.log_file.append(&key)?;
+        self.log_file.append(&value)?;
+
+        // insert into the mem_table, optionally going to disk for the old value
+        if self.mem_table.contains_key(&key) {
+            Ok(self.mem_table.insert(key, value))
+        } else {
+            let disk_res = self.get_from_disk(&key)?;
+
+            self.mem_table.insert(key, value);
+
+            Ok(disk_res)
+        }
     }
 
     pub fn delete(&self, key: Vec<u8>) -> Option<Vec<u8>> {
