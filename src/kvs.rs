@@ -6,6 +6,7 @@ use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::collections::BTreeMap;
+use std::fs;
 
 use num_cpus;
 use record_file::RecordFile;
@@ -14,10 +15,12 @@ use record::Record;
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 const SSTABLE_HEADER: &[u8; 8] = b"DATA\x01\x00\x00\x00";
 
+const MAX_MEM_COUNT: usize = 1000;
+
 pub struct KVS {
     db_dir: PathBuf,
     cur_sstable_num: u64,
-    log_file: RecordFile,
+    wal_file: RecordFile,
     mem_table: BTreeMap<Vec<u8>, Record>
 }
 
@@ -36,7 +39,7 @@ impl KVS {
         return Ok(KVS {
             db_dir: PathBuf::from(db_dir),
             cur_sstable_num: 0,
-            log_file: log_file,
+            wal_file: log_file,
             mem_table: BTreeMap::new()
         })
     }
@@ -63,6 +66,19 @@ impl KVS {
             sstable.append(&Record::serialize(value));
         }
 
+        // remove everything in the mem_table
+        self.mem_table.clear();
+
+        // rename the WAL file
+        fs::rename(self.db_dir.join("data.wal"), self.db_dir.join("old_data.wal"))?;
+
+        // open a new version
+        let wal_file_path = self.db_dir.join("data.wal");
+        self.wal_file = RecordFile::new(&wal_file_path, WAL_HEADER)?;
+
+        // remove the old one
+        fs::remove_file(self.db_dir.join("old_data.wal"))?;
+
         Ok( () )
     }
 
@@ -73,10 +89,15 @@ impl KVS {
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), IOError> {
         // create a record, and append to the WAL file
         let rec = Record::new(key.to_vec(), value);
-        self.log_file.append(&Record::serialize(&rec))?;
+        self.wal_file.append(&Record::serialize(&rec))?;
 
         // insert into the mem_table
         self.mem_table.insert(key, rec);
+
+        // check to see if we need to flush to disk
+        if self.mem_table.len() >= MAX_MEM_COUNT {
+            self.flush();
+        }
 
         Ok( () )
     }
@@ -100,8 +121,8 @@ mod tests {
     fn gen_dir() -> PathBuf {
         simple_logger::init().unwrap(); // this will panic on error
 
-        let tmp_dir: String = thread_rng().gen_ascii_chars().take(10).collect();
-        let ret_dir = PathBuf::from("/tmp").join(tmp_dir);
+        let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
+        let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
 
         debug!("CREATING TMP DIR: {:?}", ret_dir);
 
