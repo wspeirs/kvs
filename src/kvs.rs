@@ -51,6 +51,8 @@ impl KVS {
 
     /// flush the memtable to disk
     fn flush(&mut self) -> Result<(), IOError> {
+        info!("Starting a flush");
+
         if self.mem_table.len() == 0 {
             debug!("No records in mem_table");
             return Ok( () ); // don't need to do anything if we don't have values yet
@@ -107,6 +109,13 @@ impl KVS {
     }
 }
 
+impl Drop for KVS {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use kvs::KVS;
@@ -148,5 +157,19 @@ mod tests {
         kvs.put(key, value);
 
         kvs.flush();
+    }
+
+    #[test]
+    fn auto_flush() {
+        let db_dir = gen_dir();
+        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+
+        for i in 0..1001 {
+            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let key = format!("KEY_{}", rnd).as_bytes().to_vec();
+            let value = rnd.as_bytes().to_vec();
+
+            kvs.put(key, value);
+        }
     }
 }
