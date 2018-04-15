@@ -178,10 +178,7 @@ impl Drop for RecordFile {
         self.fd.write_u64::<LE>(self.end_of_file).unwrap(); // write out the end of the file
         self.fd.flush().unwrap();
 
-        debug!(
-            "RecordFile Drop: records: {}; eof: {}",
-            self.record_count, self.end_of_file
-        );
+        debug!("Drop {:?}: records: {}; eof: {}", self.file_path, self.record_count, self.end_of_file);
     }
 }
 
