@@ -2,24 +2,79 @@ use rmps::encode::to_vec;
 use rmps::decode::{from_slice, from_read};
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+
+use kvs::get_timestamp;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Record {
     key: Vec<u8>,
     value: Option<Vec<u8>>, // if None, means we're deleting this key
-    ttl: u64 // timestamp when this record should be deleted; 0 = never delete
+    created: u64, // timestamp of when the record was created
+    ttl: u64 // timestamp when this record should be deleted
 }
 
 impl Record {
     pub fn new(key: Vec<u8>, value: Vec<u8>) -> Record {
-        Record::new_with_ttl(key, value, 0)
+        Record::new_with_ttl(key, value, u64::max_value())
     }
 
     pub fn new_with_ttl(key: Vec<u8>, value: Vec<u8>, ttl: u64) -> Record {
-        Record {key: key, value: Some(value), ttl: ttl}
+        Record {
+            key: key,
+            value: Some(value),
+            created: get_timestamp(),
+            ttl: ttl
+        }
     }
 
     pub fn serialize(rec: &Record) -> Vec<u8> {
         return to_vec(rec).unwrap(); // should handle this better
     }
+
+    pub fn is_expired(&self, ts: u64) -> bool {
+        self.ttl <= ts
+    }
+
+    pub fn get_created(&self) -> u64 {
+        self.created
+    }
+
+    pub fn is_delete(&self) -> bool {
+        self.value.is_none()
+    }
+
+    pub fn get_key(&self) -> Vec<u8> {
+        self.key.to_owned()
+    }
+
+    pub fn get_value(&self) -> Vec<u8> {
+        self.value.to_owned().expect("Tried to get value of delete record")
+    }
 }
+
+impl PartialOrd for Record {
+    fn partial_cmp(&self, other: &Record) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Record {
+    fn cmp(&self, other: &Record) -> Ordering {
+        let key_ord = self.key.cmp(&other.key);
+
+        match key_ord {
+            Ordering::Equal => self.created.cmp(&other.created),
+            Ordering::Less | Ordering::Greater => key_ord
+        }
+    }
+}
+
+impl PartialEq for Record {
+    fn eq(&self, other: &Record) -> bool {
+        self.key == other.key && self.created == self.created
+    }
+}
+
+impl Eq for Record { }
+

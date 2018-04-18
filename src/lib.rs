@@ -14,10 +14,11 @@ extern crate serde_derive;
 #[cfg(test)] extern crate simple_logger;
 #[cfg(test)] extern crate rand;
 
-pub mod kvs;
 mod record_file;
+mod sstable;
 mod record;
 
-pub use kvs::KVS;
+pub mod kvs;
 
+pub use kvs::KVS;
 

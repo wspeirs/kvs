@@ -1,19 +1,19 @@
-
 use std::path::PathBuf;
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc::channel;
 use std::thread;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use num_cpus;
 use record_file::RecordFile;
+use sstable::SSTable;
 use record::Record;
 
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
-const SSTABLE_HEADER: &[u8; 8] = b"DATA\x01\x00\x00\x00";
 
 const MAX_MEM_COUNT: usize = 1000;
 
@@ -21,32 +21,52 @@ pub struct KVS {
     db_dir: PathBuf,
     cur_sstable_num: u64,
     wal_file: RecordFile,
+    sstables: BTreeSet<SSTable>,
     mem_table: BTreeMap<Vec<u8>, Record>
+}
+
+/// Gets the timestamp/epoch in ms
+pub fn get_timestamp() -> u64 {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
+
+    return ts.as_secs() * 1000 + ts.subsec_nanos() as u64 / 1_000_000;
 }
 
 /**
  * Files have the following meansings:
  * data.wal     - Write Ahead Log; journal of all put & deletes that are in mem_table
- * table_#.data - The various SSTables; highest numbers = newest file.
+ * table_#.data - The various SSTables
  */
 
 impl KVS {
     /// Creates a new KVS given a directory to store the files
     pub fn new(db_dir: &PathBuf) -> Result<KVS, IOError> {
-        let log_file_path = db_dir.join("data.wal");
-        let log_file = RecordFile::new(&log_file_path, WAL_HEADER)?;
+        let wal_file_path = db_dir.join("data.wal");
+        let wal_file = RecordFile::new(&wal_file_path, WAL_HEADER)?;
+
+        let mut sstables = BTreeSet::<SSTable>::new();
+
+        // gather up all the SSTables in this directory
+        for entry in fs::read_dir(db_dir)? {
+            let entry = entry.expect("Error reading directory entry");
+            let path = entry.path();
+
+            if path.is_dir() {
+                continue
+            }
+
+            if path.ends_with(".data") {
+                sstables.insert(SSTable::new(&path)?);
+            }
+        }
 
         return Ok(KVS {
             db_dir: PathBuf::from(db_dir),
             cur_sstable_num: 0,
-            wal_file: log_file,
+            wal_file: wal_file,
+            sstables: sstables,
             mem_table: BTreeMap::new()
         })
-    }
-
-    /// Attempts to read a value for a given key from the SSTables on disk
-    fn get_from_disk(&mut self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, IOError> {
-        Ok(None)
     }
 
     /// flush the memtable to disk
@@ -60,16 +80,22 @@ impl KVS {
 
         // open a new SSTable
         let sstable_path = self.db_dir.join(format!("table_{}.data", self.cur_sstable_num));
-        let mut sstable = RecordFile::new(&sstable_path, SSTABLE_HEADER)?;
+        let mut sstable = SSTable::new(&sstable_path)?;
         self.cur_sstable_num += 1; // bump our count
 
         // go through the records in the mem_table, and add to file
         for (key, value) in self.mem_table.iter() {
-            sstable.append(&Record::serialize(value));
+            sstable.append(value);
         }
+
+        // flush the table, and add it to our set
+        sstable.flush().expect("Error flushing SSTable");
+        self.sstables.insert(sstable);
 
         // remove everything in the mem_table
         self.mem_table.clear();
+
+        debug!("MEM TABLE: {}", self.mem_table.len());
 
         // rename the WAL file
         fs::rename(self.db_dir.join("data.wal"), self.db_dir.join("old_data.wal"))?;
@@ -81,14 +107,45 @@ impl KVS {
         // remove the old one
         fs::remove_file(self.db_dir.join("old_data.wal"))?;
 
+        info!("Leaving flush");
+
         Ok( () )
     }
 
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
+        let cur_time = get_timestamp();
+
+        debug!("MEM TABLE: {}", self.mem_table.len());
+
+        // first check the mem_table
+        if self.mem_table.contains_key(key) {
+            let rec = self.mem_table.get(key).unwrap();
+
+            // found an expired or deleted key
+            return if rec.is_expired(cur_time) || rec.is_delete() {
+                None
+            } else {
+                Some(rec.get_value())
+            };
+        }
+
+        // need to go to SSTables
+        for sstable in self.sstables.iter() {
+            debug!("SSTABLE: {:?}", sstable.get_oldest_ts());
+
+            let ret = sstable.get(key.to_vec());
+
+            if ret.is_some() {
+                return ret;
+            }
+        }
+
         None
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), IOError> {
+        info!("Called put: {:?}", key);
+
         // create a record, and append to the WAL file
         let rec = Record::new(key.to_vec(), value);
         self.wal_file.append(&Record::serialize(&rec))?;
@@ -154,9 +211,9 @@ mod tests {
         let key = "KEY".as_bytes().to_vec();
         let value = "VALUE".as_bytes().to_vec();
 
-        kvs.put(key, value);
+        kvs.put(key, value).unwrap();
 
-        kvs.flush();
+        kvs.flush().unwrap();
     }
 
     #[test]
@@ -169,7 +226,22 @@ mod tests {
             let key = format!("KEY_{}", rnd).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
 
-            kvs.put(key, value);
+            kvs.put(key, value).unwrap();
         }
+    }
+
+    #[test]
+    fn get() {
+        let db_dir = gen_dir();
+        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+
+        let key = "KEY".as_bytes();
+        let value = "VALUE".as_bytes();
+
+        kvs.put(key.to_vec(), value.to_vec()).unwrap();
+
+        kvs.flush().unwrap();
+
+        debug!("GOT: {:?}", kvs.get(&key.to_vec()));
     }
 }
