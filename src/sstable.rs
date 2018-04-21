@@ -4,9 +4,14 @@ use rmps::decode::from_slice;
 use serde::{Deserialize, Serialize};
 
 use std::cmp::Ordering;
-use std::io::{Error as IOError};
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::io::{Error as IOError, ErrorKind};
 use std::path::PathBuf;
 
+use std::iter::IntoIterator;
+use std::borrow::Borrow;
+
+use record_file::buf2string;
 use record_file::RecordFile;
 use record::Record;
 
@@ -15,6 +20,7 @@ const SSTABLE_HEADER: &[u8; 8] = b"DATA\x01\x00\x00\x00";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct SSTableInfo {
+    indices: Vec<u64>,
     smallest_key: Vec<u8>,
     largest_key: Vec<u8>,
     oldest_ts: u64
@@ -22,20 +28,18 @@ struct SSTableInfo {
 
 pub struct SSTable {
     rec_file: RecordFile,
-    info: Option<SSTableInfo>
+    info: SSTableInfo
 }
 
 impl SSTable {
-    pub fn new(file_path: &PathBuf) -> Result<SSTable, IOError> {
-        let is_new = file_path.exists();
+    pub fn open(file_path: &PathBuf) -> Result<SSTable, IOError> {
+        if !file_path.exists() {
+            return Err(IOError::new(ErrorKind::NotFound, format!("The SSTable {:?} was not found", file_path)));
+        }
 
         let mut rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
 
-        let info = if is_new {
-            Some(from_slice(&rec_file.get_last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo"))
-        } else {
-            None
-        };
+        let info = from_slice(&rec_file.get_last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo");
 
         info!("Created SSTable: {:?}", file_path);
 
@@ -45,78 +49,173 @@ impl SSTable {
         })
     }
 
-    pub fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
-        let info : &SSTableInfo = self.info.as_ref().expect("Error trying to using newly created SSTable");
-
-        // check if the key is in the range of this SSTable
-        if key < info.smallest_key || info.largest_key < key {
-            return None;
+    /// Creates a new `SSTable` that is immutable once returned.
+    /// * file_path - the path to the SSTable to create
+    /// * records - an iterator to records that will be inserted into this `SSTable`
+    /// * index_count - the number of records to group together for each recorded index
+    /// * count - the number of records to pull from the iterator and put into the `SSTable`
+    pub fn new<I, B>(file_path: &PathBuf,  records: &mut I, index_count: u32, count: Option<u64>) -> Result<SSTable, IOError>
+        where I: Iterator<Item=B>, B: Borrow<Record>
+    {
+        if file_path.exists() {
+            return Err(IOError::new(ErrorKind::AlreadyExists, format!("The SSTable {:?} already exists", file_path)));
         }
 
-        // for now, just iterate through looking for the key
-        for rec_buff in self.rec_file.iter() {
-            let rec :Record = from_slice(&rec_buff).expect("Error decoding Record");
+        let rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
 
-            if rec.get_key() == key {
-                return Some(rec.get_value())
-            } else if rec.get_key() > key {
-                return None
+        info!("Created SSTable: {:?}", file_path);
+
+        let mut sstable_info = SSTableInfo { indices: vec!(), smallest_key: vec!(), largest_key: vec!(), oldest_ts: 0 };
+        let rec_opt = records.next();
+
+        if rec_opt.is_none() {
+            panic!("Attempted to create SSTable with empty iterator");
+        }
+
+        let rec = rec_opt.unwrap();
+
+        // setup our info for this table
+        sstable_info.smallest_key = rec.borrow().get_key();
+        sstable_info.largest_key = rec.borrow().get_key();
+        sstable_info.oldest_ts = rec.borrow().get_created();
+
+        // create our SSTable
+        let mut sstable = SSTable {
+            rec_file: rec_file,
+            info: sstable_info
+        };
+
+        // append this record, and record it's index
+        let loc = sstable.append(&rec.borrow())?;
+        sstable.info.indices.push(loc);
+
+        let mut insert_count :u64 = 1;
+
+        // maybe we have an SSTable with only 1 record?
+        if count.is_some() && count.unwrap() >= insert_count {
+            // append our info as the last record, and flush to disk
+            let info_buff = to_vec(&sstable.info).unwrap();
+            sstable.rec_file.append_flush(&info_buff)?;
+
+            debug!("RETURN EARLY");
+
+            return Ok(sstable);
+        }
+
+        // keep fetching from this iterator
+        while let Some(rec) = records.next() {
+            let loc = sstable.append(&rec.borrow())?;
+            insert_count += 1;
+
+            // add to our indices
+            if insert_count % index_count as u64 == 0 {
+                sstable.info.indices.push(loc);
+            }
+
+            // break out if we've reached our limit
+            if count.is_some() && count.unwrap() >= insert_count {
+                break;
             }
         }
 
-        None // should never get here
+        // append our info as the last record, and flush to disk
+        let info_buff = to_vec(&sstable.info).unwrap();
+        sstable.rec_file.append_flush(&info_buff)?;
+
+        Ok(sstable)
     }
 
-    pub fn append(&mut self, rec: &Record) -> Result<(), IOError> {
-        self.rec_file.append(&Record::serialize(rec))?; // append without flush
+    fn append(&mut self, rec: &Record) -> Result<u64, IOError> {
+        let loc = self.rec_file.append(&Record::serialize(rec))?; // append without flush
 
         let key = rec.get_key();
         let ts = rec.get_created();
 
-        // check to see if this is a new SSTable or not
-        if self.info.is_none() {
-            self.info = Some(SSTableInfo {
-                smallest_key: key.to_vec(),
-                largest_key: key,
-                oldest_ts: ts
-            })
-        } else {
-            let info : &mut SSTableInfo = self.info.as_mut().expect("Error unwrapping some");
+        // update the smallest & largest key
+        if key < self.info.smallest_key {
+            self.info.smallest_key = key.to_vec();
+        }
 
-            // update the smallest & largest key
-            if key < info.smallest_key {
-                info.smallest_key = key.to_vec();
-            }
+        if key > self.info.largest_key {
+            self.info.largest_key = key;
+        }
 
-            if key > info.largest_key {
-                info.largest_key = key;
-            }
+        // update the ts if it's older
+        if ts > self.info.oldest_ts {
+            self.info.oldest_ts = ts;
+        }
 
-            // update the ts if it's older
-            if ts > info.oldest_ts {
-                info.oldest_ts = ts;
+        Ok(loc)
+    }
+
+    pub fn get(&self, key: Vec<u8>) -> Result<Option<Record>, IOError> {
+        // check if the key is in the range of this SSTable
+        if key < self.info.smallest_key || self.info.largest_key < key {
+            return Ok(None);
+        }
+
+        // binary search using the indices, then iterating from there
+        let index_res = self.info.indices.binary_search_by(|index| {
+            let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
+            let rec :Record = from_slice(&rec_buff).unwrap();
+
+            rec.get_key().cmp(&key)
+        });
+
+        let start_offset = self.info.indices[match index_res {
+            Ok(i) => i,
+            Err(i) => i-1
+        }];
+
+        debug!("Binary search: {:?} -> {}", index_res, start_offset);
+
+        for rec_buff in self.rec_file.iter_from(start_offset as u64) {
+            let rec :Record = from_slice(&rec_buff).expect("Error decoding Record");
+
+            if rec.get_key() == key {
+                debug!("FOUND KEY!!!");
+                return Ok(Some(rec));
+            } else if rec.get_key() > key {
+                return Ok(None);
             }
         }
 
-        Ok( () )
-    }
-
-    pub fn flush(&mut self) -> Result<(), IOError> {
-        self.rec_file.flush()
+        Ok(None) // should never get here
     }
 
     pub fn get_oldest_ts(&self) -> u64 {
-        self.info.as_ref().expect("Attempting to get oldest ts from new SSTable").oldest_ts
+        self.info.oldest_ts
     }
 }
 
-impl Drop for SSTable {
-    fn drop(&mut self) {
-        let info_buff = to_vec(&self.info.as_ref().expect("Trying to drop/close an empty SSTable")).expect("Error serializing SSTableInfo");
+//impl Drop for SSTable {
+//    fn drop(&mut self) {
+//        debug!("Calling Drop on SSTable");
+//        let info_buff = to_vec(&self.info).expect("Error serializing SSTableInfo");
+//
+//        self.rec_file.append_flush(&info_buff);
+//    }
+//}
 
-        self.rec_file.append_flush(&info_buff);
+impl Debug for SSTable {
+    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
+        formatter.debug_struct("SSTable")
+            .field("record_file", &self.rec_file)
+            .field("info", &self.info)
+            .finish()
     }
 }
+
+impl Debug for SSTableInfo {
+    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
+        formatter.debug_struct("SSTableInfo")
+            .field("smallest_key", &buf2string(&self.smallest_key))
+            .field("largest_key", &buf2string(&self.largest_key))
+            .field("indices", &self.indices)
+            .finish()
+    }
+}
+
 
 impl PartialOrd for SSTable {
     fn partial_cmp(&self, other: &SSTable) -> Option<Ordering> {
@@ -126,13 +225,13 @@ impl PartialOrd for SSTable {
 
 impl Ord for SSTable {
     fn cmp(&self, other: &SSTable) -> Ordering {
-        self.info.as_ref().expect("Attempting to compare new SSTable").oldest_ts.cmp(&other.info.as_ref().expect("Attempting to compare new SSTable").oldest_ts)
+        self.info.oldest_ts.cmp(&other.info.oldest_ts)
     }
 }
 
 impl PartialEq for SSTable {
     fn eq(&self, other: &SSTable) -> bool {
-        self.info.as_ref().expect("Attempting to eq new SSTable").oldest_ts == other.info.as_ref().expect("Attempting to eq new SSTable").oldest_ts
+        self.info.oldest_ts == other.info.oldest_ts
     }
 }
 
@@ -165,12 +264,44 @@ mod tests {
     }
 
     #[test]
-    fn new_append() {
+    fn new_open() {
         let db_dir = gen_dir();
-        let mut sstable = SSTable::new(&db_dir.join("test.data")).unwrap();
-
         let rec = Record::new(vec![1;8], vec![2;8]);
+        let records = vec![rec];
 
-        sstable.append(&rec).unwrap();
+        {
+            SSTable::new(&db_dir.join("test.data"), &mut records.iter(), 2, None).unwrap();
+        }
+
+        let sstable_2 = SSTable::open(&db_dir.join("test.data")).unwrap();
+
+        let ret = sstable_2.get(vec![1;8]).unwrap();
+
+        assert!(ret.is_some());
+        assert_eq!(ret.unwrap(), Record::new(vec![1;8], vec![2;8]));
+    }
+
+    #[test]
+    fn get() {
+        let db_dir = gen_dir();
+        let mut records = vec![];
+
+        for i in 0..100 {
+            let rec = Record::new(vec![i], vec![i]);
+
+            records.push(rec);
+        }
+
+        let sstable = SSTable::new(&db_dir.join("test.data"), &mut records.iter(), 2, None).unwrap();
+
+        debug!("SSTABLE: {:?}", sstable);
+
+        // look for all the records
+        for i in 0..100 {
+            let ret = sstable.get(vec![i]).unwrap();
+
+            assert!(ret.is_some());
+            assert_eq!(ret.unwrap(), Record::new(vec![i], vec![i]));
+        }
     }
 }

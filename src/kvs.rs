@@ -56,7 +56,7 @@ impl KVS {
             }
 
             if path.ends_with(".data") {
-                sstables.insert(SSTable::new(&path)?);
+                sstables.insert(SSTable::open(&path)?);
             }
         }
 
@@ -78,18 +78,12 @@ impl KVS {
             return Ok( () ); // don't need to do anything if we don't have values yet
         }
 
-        // open a new SSTable
+        // create a new SSTable
         let sstable_path = self.db_dir.join(format!("table_{}.data", self.cur_sstable_num));
-        let mut sstable = SSTable::new(&sstable_path)?;
         self.cur_sstable_num += 1; // bump our count
 
-        // go through the records in the mem_table, and add to file
-        for (key, value) in self.mem_table.iter() {
-            sstable.append(value);
-        }
+        let sstable = SSTable::new(&sstable_path, &mut self.mem_table.values(), MAX_MEM_COUNT as u32, None)?;
 
-        // flush the table, and add it to our set
-        sstable.flush().expect("Error flushing SSTable");
         self.sstables.insert(sstable);
 
         // remove everything in the mem_table
@@ -131,13 +125,24 @@ impl KVS {
 
         // need to go to SSTables
         for sstable in self.sstables.iter() {
-            debug!("SSTABLE: {:?}", sstable.get_oldest_ts());
+            debug!("SSTABLE: {:?}", sstable);
 
-            let ret = sstable.get(key.to_vec());
+            let ret_opt = sstable.get(key.to_vec()).expect("Error reading from SSTable");
 
-            if ret.is_some() {
-                return ret;
+            // we didn't find the key
+            if ret_opt.is_none() {
+                return None;
             }
+
+            let rec = ret_opt.unwrap();
+
+            // sanity check
+            if rec.is_delete() {
+                warn!("Found deleted key in SSTable: {:?}", sstable);
+                return None;
+            }
+
+            return Some(rec.get_value());
         }
 
         None

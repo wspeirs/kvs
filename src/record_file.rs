@@ -2,6 +2,7 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use positioned_io::{ReadAt, ReadBytesExt as PositionedReadBytesExt};
 
 use std::cell::RefCell;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::fs::{File, OpenOptions};
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -142,12 +143,15 @@ impl RecordFile {
     pub fn append_flush(&mut self, record: &[u8]) -> Result<u64, IOError> {
         let ret = self.append(record);
 
-        self.fd.flush();
+        self.flush();
 
         ret
     }
 
     pub fn flush(&mut self) -> Result<(), IOError> {
+        self.fd.seek(SeekFrom::Start(self.header_len as u64)).unwrap();
+        self.fd.write_u32::<LE>(self.record_count).unwrap(); // cannot return an error, so best attempt
+        self.fd.write_u64::<LE>(self.last_record).unwrap(); // write out the end of the file
         self.fd.flush()
     }
 
@@ -174,16 +178,34 @@ impl RecordFile {
         }
     }
 
+    /// Creates an iterator from a given offset
+    pub fn iter_from(&self, offset: u64) -> Iter {
+        Iter {
+            record_file: RefCell::new(self),
+            cur_offset: Some(offset)
+        }
+    }
+
 }
 
 impl Drop for RecordFile {
     fn drop(&mut self) {
-        self.fd.seek(SeekFrom::Start(self.header_len as u64)).unwrap();
-        self.fd.write_u32::<LE>(self.record_count).unwrap(); // cannot return an error, so best attempt
-        self.fd.write_u64::<LE>(self.last_record).unwrap(); // write out the end of the file
-        self.fd.flush().unwrap();
+//        self.fd.seek(SeekFrom::Start(self.header_len as u64)).unwrap();
+//        self.fd.write_u32::<LE>(self.record_count).unwrap(); // cannot return an error, so best attempt
+//        self.fd.write_u64::<LE>(self.last_record).unwrap(); // write out the end of the file
+//        self.fd.flush().unwrap();
+//
+        debug!("DROP: {:?}: records: {}; last record: {}", self.file_path, self.record_count, self.last_record);
+    }
+}
 
-        debug!("Drop {:?}: records: {}; last record: {}", self.file_path, self.record_count, self.last_record);
+impl Debug for RecordFile {
+    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
+        formatter.debug_struct("RecordFile")
+            .field("file_path", &self.file_path)
+            .field("record_count", &self.record_count)
+            .field("last_record", &self.last_record)
+            .finish()
     }
 }
 
@@ -201,11 +223,11 @@ impl<'a> Iterator for Iter<'a> {
         }
 
         let rec = match self.record_file.borrow().read_at(self.cur_offset.unwrap()) {
-                Err(e) => panic!("Error reading file: {}", e.to_string()),
+                Err(e) => panic!("Error reading file at {}: {}", self.cur_offset.unwrap(), e.to_string()),
                 Ok(r) => r
         };
 
-        self.cur_offset = Some(self.cur_offset.unwrap() + rec.len() as u64 + 8); // update our current record pointer
+        self.cur_offset = Some(self.cur_offset.unwrap() + rec.len() as u64 + 4); // update our current record pointer
 
         if self.cur_offset.unwrap() == self.record_file.borrow().last_record {
             self.cur_offset = None;

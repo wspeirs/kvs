@@ -2,7 +2,11 @@ use rmps::encode::to_vec;
 use rmps::decode::{from_slice, from_read};
 
 use serde::{Deserialize, Serialize};
+
 use std::cmp::Ordering;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+
+use record_file::buf2string;
 
 use kvs::get_timestamp;
 
@@ -78,3 +82,13 @@ impl PartialEq for Record {
 
 impl Eq for Record { }
 
+impl Debug for Record {
+    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
+        formatter.debug_struct("Record")
+            .field("key", &buf2string(&self.key))
+            .field("value", &match &self.value { &None => String::from("None"), &Some(ref v) => buf2string(&v) })
+            .field("created", &self.created)
+            .field("ttl", &self.ttl)
+            .finish()
+    }
+}
