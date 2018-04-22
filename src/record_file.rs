@@ -1,11 +1,14 @@
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
-use positioned_io::{ReadAt, ReadBytesExt as PositionedReadBytesExt};
+use positioned_io::{ReadAt, WriteAt, WriteBytesExt as PositionedWriteBytesExt, ReadBytesExt as PositionedReadBytesExt};
 
 use std::cell::RefCell;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::fs::{File, OpenOptions};
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+
+use U32_SIZE;
+use U64_SIZE;
 
 /// This struct represents the on-disk format of the RecordFile
 /// |---------------------------|
@@ -62,7 +65,7 @@ impl RecordFile {
             .create(true)
             .open(&file_path)?;
         let mut record_count = 0;
-        let mut last_record = (header.len() + 4 + 8) as u64;
+        let mut last_record = (header.len() + U32_SIZE + U64_SIZE) as u64;
 
         fd.seek(SeekFrom::Start(0))?;
 
@@ -152,7 +155,7 @@ impl RecordFile {
         self.fd.seek(SeekFrom::Start(self.header_len as u64)).unwrap();
         self.fd.write_u32::<LE>(self.record_count).unwrap(); // cannot return an error, so best attempt
         self.fd.write_u64::<LE>(self.last_record).unwrap(); // write out the end of the file
-        self.fd.flush()
+        Write::flush(&mut self.fd)
     }
 
     /// Read a record from a given offset
@@ -160,7 +163,7 @@ impl RecordFile {
         let rec_size = self.fd.read_u32_at::<LE>(file_offset)?;
         let mut rec_buff = vec![0; rec_size as usize];
 
-        self.fd.read_exact_at(file_offset + 4, &mut rec_buff)?;
+        self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
 
         debug!(
             "READ RECORD FROM {}: {}",
@@ -171,10 +174,26 @@ impl RecordFile {
         Ok(rec_buff)
     }
 
+    /// Writes a record at a given offset... this is potentially VERY dangerous
+    pub fn write_at(&mut self, file_offset: u64, record: &[u8], size_check: bool) -> Result<(), IOError> {
+        if size_check {
+            let rec = self.read_at(file_offset)?;
+//            debug!("{} {}", rec_to_string(rec.len() as u32, &rec), rec_to_string(record.len() as u32, record));
+            assert_eq!(rec.len(), record.len());
+        }
+
+        self.fd.write_u32_at::<LE>(file_offset, record.len() as u32)?;
+        self.fd.write_all_at(file_offset + U32_SIZE as u64, &record)?;
+
+        debug!("WROTE RECORD AT {}: {}", file_offset, rec_to_string(record.len() as u32, record));
+
+        Ok( () )
+    }
+
     pub fn iter(&self) -> Iter {
         Iter {
             record_file: RefCell::new(self),
-            cur_offset: Some(self.header_len as u64 + 4 + 8)
+            cur_offset: Some((self.header_len + U32_SIZE + U64_SIZE) as u64)
         }
     }
 
@@ -227,7 +246,8 @@ impl<'a> Iterator for Iter<'a> {
                 Ok(r) => r
         };
 
-        self.cur_offset = Some(self.cur_offset.unwrap() + rec.len() as u64 + 4); // update our current record pointer
+        // update our current record pointer
+        self.cur_offset = Some((self.cur_offset.unwrap() as usize + rec.len() + U32_SIZE) as u64);
 
         if self.cur_offset.unwrap() == self.record_file.borrow().last_record {
             self.cur_offset = None;
@@ -262,7 +282,7 @@ impl Iterator for RecordFileIterator {
     fn next(&mut self) -> Option<Self::Item> {
         // move to the start of the records if this is the first time through
         if self.cur_record == 0 {
-            let offset = self.record_file.borrow().header_len as u64 + 4 + 8;
+            let offset = (self.record_file.borrow().header_len as usize + U32_SIZE + U64_SIZE) as u64;
             self.record_file
                 .get_mut()
                 .fd
@@ -321,7 +341,7 @@ impl<'a> Iterator for MutRecordFileIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         // move to the start of the records if this is the first time through
         if self.cur_record == 0 {
-            let offset = self.record_file.borrow().header_len as u64 + 4 + 8;
+            let offset = (self.record_file.borrow().header_len as usize + U32_SIZE + U64_SIZE) as u64;
             self.record_file
                 .get_mut()
                 .fd

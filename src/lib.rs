@@ -17,8 +17,14 @@ extern crate serde_derive;
 mod record_file;
 mod sstable;
 mod record;
+mod serde_utils;
 
 pub mod kvs;
 
 pub use kvs::KVS;
+
+use std::mem;
+
+const U32_SIZE :usize = mem::size_of::<u32>();
+const U64_SIZE :usize = mem::size_of::<u64>();
 
