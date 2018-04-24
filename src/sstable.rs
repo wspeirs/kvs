@@ -3,13 +3,13 @@ use rmps::decode::from_slice;
 
 use serde::{Deserialize, Serialize};
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{Error as IOError, ErrorKind};
 use std::path::PathBuf;
-
+use std::cell::RefCell;
 use std::iter::IntoIterator;
-use std::borrow::Borrow;
 
 use record_file::buf2string;
 use record_file::RecordFile;
@@ -219,19 +219,14 @@ impl SSTable {
         Ok(ret)
     }
 
+    pub fn iter(&self) -> Iter {
+        return Iter { sstable: self, cur_record: 0, cur_offset: self.info.indices[0] }
+    }
+
     pub fn get_oldest_ts(&self) -> u64 {
         self.info.oldest_ts
     }
 }
-
-//impl Drop for SSTable {
-//    fn drop(&mut self) {
-//        debug!("Calling Drop on SSTable");
-//        let info_buff = to_vec(&self.info).expect("Error serializing SSTableInfo");
-//
-//        self.rec_file.append_flush(&info_buff);
-//    }
-//}
 
 impl Debug for SSTable {
     fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
@@ -252,6 +247,40 @@ impl Debug for SSTableInfo {
             .field("oldest_ts", &self.oldest_ts)
             .field("indices", &self.indices)
             .finish()
+    }
+}
+
+
+pub struct Iter<'a> {
+    sstable: &'a SSTable,
+    cur_record: u64,
+    cur_offset: u64
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = Record;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cur_record == self.sstable.info.record_count {
+            return None;
+        }
+
+        let rec_buff = self.sstable.rec_file.read_at(self.cur_offset).expect("Error reading SSTable");
+        let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
+
+        self.cur_record += 1;
+        self.cur_offset += (rec_buff.len() + U32_SIZE) as u64;
+
+        // need to skip over the group index records
+        if self.cur_record % self.sstable.info.group_count as u64 == 0 {
+            self.cur_offset += ((self.sstable.info.group_count as usize * U64_SIZE) + U32_SIZE) as u64;
+        }
+
+        Some(rec)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.sstable.info.record_count as usize, Some(self.sstable.info.record_count as usize))
     }
 }
 
@@ -303,7 +332,7 @@ mod tests {
         return ret_dir;
     }
 
-    fn new_open(num_records: usize, group_size: u32) {
+    fn new_open(num_records: usize, group_size: u32) -> SSTable {
         let db_dir = gen_dir();
         let mut records = vec![];
 
@@ -317,7 +346,7 @@ mod tests {
             SSTable::new(&db_dir.join("test.data"), &mut records.iter(), group_size, None).unwrap();
         }
 
-        let sstable_2 = SSTable::open(&db_dir.join("test.data")).unwrap();
+        SSTable::open(&db_dir.join("test.data")).unwrap()
     }
 
     #[test]
@@ -341,18 +370,9 @@ mod tests {
     }
 
     fn get(num_records: usize, group_size: u32) {
-        let db_dir = gen_dir();
-        let mut records = vec![];
+        let sstable = new_open(num_records, group_size);
 
-        for i in 0..num_records {
-            let rec = Record::new(serialize_u64_exact(&vec![i as u64]), serialize_u64_exact(&vec![i as u64]));
-
-            records.push(rec);
-        }
-
-        let sstable = SSTable::new(&db_dir.join("test.data"), &mut records.iter(), group_size, None).unwrap();
-
-        debug!("SSTABLE: {:?}", sstable);
+        debug!("GET TEST SSTABLE: {:?}", sstable);
 
         // look for all the records
         for i in 0..num_records {
@@ -384,4 +404,38 @@ mod tests {
         get(1, 1);
     }
 
+    fn iterate(num_records: usize, group_size: u32) {
+        let sstable = new_open(num_records, group_size);
+
+        debug!("ITER TEST SSTABLE: {:?}", sstable);
+
+        let mut it = sstable.iter();
+        let mut count = 0;
+
+        while let Some(rec) = it.next() {
+            count += 1;
+        }
+
+        assert_eq!(num_records, count);
+    }
+
+    #[test]
+    fn test_iter_100_2() {
+        iterate(100, 2);
+    }
+
+    #[test]
+    fn test_iter_10000_10() {
+        iterate(10000, 10);
+    }
+
+    #[test]
+    fn test_iter_1_10() {
+        iterate(1, 10);
+    }
+
+    #[test]
+    fn test_iter_1_1() {
+        iterate(1, 1);
+    }
 }
