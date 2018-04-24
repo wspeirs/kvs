@@ -121,7 +121,7 @@ impl RecordFile {
         })
     }
 
-    pub fn get_last_record(&mut self) -> Result<Vec<u8>, IOError> {
+    pub fn get_last_record(&self) -> Result<Vec<u8>, IOError> {
         self.read_at(self.last_record)
     }
 
@@ -192,7 +192,7 @@ impl RecordFile {
 
     pub fn iter(&self) -> Iter {
         Iter {
-            record_file: RefCell::new(self),
+            record_file: self,
             cur_offset: Some((self.header_len + U32_SIZE + U64_SIZE) as u64)
         }
     }
@@ -200,7 +200,7 @@ impl RecordFile {
     /// Creates an iterator from a given offset
     pub fn iter_from(&self, offset: u64) -> Iter {
         Iter {
-            record_file: RefCell::new(self),
+            record_file: self,
             cur_offset: Some(offset)
         }
     }
@@ -229,7 +229,7 @@ impl Debug for RecordFile {
 }
 
 pub struct Iter<'a> {
-    record_file: RefCell<&'a RecordFile>,
+    record_file: &'a RecordFile,
     cur_offset: Option<u64>
 }
 
@@ -241,7 +241,7 @@ impl<'a> Iterator for Iter<'a> {
             return None;
         }
 
-        let rec = match self.record_file.borrow().read_at(self.cur_offset.unwrap()) {
+        let rec = match self.record_file.read_at(self.cur_offset.unwrap()) {
                 Err(e) => panic!("Error reading file at {}: {}", self.cur_offset.unwrap(), e.to_string()),
                 Ok(r) => r
         };
@@ -249,7 +249,7 @@ impl<'a> Iterator for Iter<'a> {
         // update our current record pointer
         self.cur_offset = Some((self.cur_offset.unwrap() as usize + rec.len() + U32_SIZE) as u64);
 
-        if self.cur_offset.unwrap() == self.record_file.borrow().last_record {
+        if self.cur_offset.unwrap() == self.record_file.last_record {
             self.cur_offset = None;
         }
 
