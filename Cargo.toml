@@ -5,6 +5,7 @@ authors = ["William Speirs <bill.speirs@gmail.com>"]
 
 [dependencies]
 byteorder = "1.2"
+itertools = "0.7"
 log = "0.4"
 num_cpus = "1.0"
 positioned-io = "0.2.2"

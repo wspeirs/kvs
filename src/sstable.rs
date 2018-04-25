@@ -44,7 +44,7 @@ impl SSTable {
             return Err(IOError::new(ErrorKind::NotFound, format!("The SSTable {:?} was not found", file_path)));
         }
 
-        let mut rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
+        let rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
 
         let info = from_slice(&rec_file.get_last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo");
 
@@ -63,6 +63,8 @@ impl SSTable {
     pub fn new<I, B>(file_path: &PathBuf,  records: &mut I, group_count: u32, count: Option<u64>) -> Result<SSTable, IOError>
         where I: Iterator<Item=B>, B: Borrow<Record>
     {
+        info!("New SSTable: {:?}", file_path);
+
         assert_ne!(group_count, 0); // need at least 1 in the group
         if count.is_some() { assert_ne!(count.unwrap(), 0); }
 
@@ -89,9 +91,15 @@ impl SSTable {
         let mut cur_key :Vec<u8> = vec![];
         let mut cur_ts = 0;
 
+        // make space for the record_group_indices
+        let record_group_indices_buff = serialize_u64_exact(&group_indices);
+        cur_group_indices_offset = rec_file.append(&record_group_indices_buff)?;
+
         // keep fetching from this iterator
         while let Some(r) = records.next() {
             let rec = r.borrow();
+
+            debug!("GOT REC: {:?}", rec);
 
             // quick sanity check to ensure we're in sorted order
             if sstable_info.record_count != 0 && rec.get_key() <= cur_key {
@@ -99,11 +107,7 @@ impl SSTable {
             }
 
             // take care of our group_indices
-            if sstable_info.record_count == 0 {
-                // the first time through we just make space for the record_group_indices
-                let record_group_indices_buff = serialize_u64_exact(&group_indices);
-                cur_group_indices_offset = rec_file.append(&record_group_indices_buff)?;
-            } else if sstable_info.record_count % group_count as u64 == 0 {
+            if sstable_info.record_count != 0 && sstable_info.record_count % group_count as u64 == 0 {
                 // write the current record_group_indices to disk
                 let record_group_indices_buff = serialize_u64_exact(&group_indices);
                 rec_file.write_at(cur_group_indices_offset, &record_group_indices_buff, true)?;
@@ -170,7 +174,7 @@ impl SSTable {
 
     pub fn get(&self, key: Vec<u8>) -> Result<Option<Record>, IOError> {
         // check if the key is in the range of this SSTable
-        if key < self.info.smallest_key || self.info.largest_key < key {
+        if self.info.record_count == 0 || key < self.info.smallest_key || self.info.largest_key < key {
             return Ok(None);
         }
 
@@ -220,7 +224,11 @@ impl SSTable {
     }
 
     pub fn iter(&self) -> Iter {
-        return Iter { sstable: self, cur_record: 0, cur_offset: self.info.indices[0] }
+        return Iter {
+            sstable: self,
+            cur_record: 0,
+            cur_offset: if self.info.record_count == 0 { 0 } else { self.info.indices[0] }
+        }
     }
 
     pub fn get_oldest_ts(&self) -> u64 {
@@ -313,6 +321,7 @@ mod tests {
     use std::path::PathBuf;
     use std::thread;
     use std::time;
+    use std::iter;
     use rand::{thread_rng, Rng};
     use std::fs::create_dir;
     use simple_logger;
@@ -347,6 +356,13 @@ mod tests {
         }
 
         SSTable::open(&db_dir.join("test.data")).unwrap()
+    }
+
+    #[test]
+    fn test_new_empty() {
+        let db_dir = gen_dir();
+
+        SSTable::new(&db_dir.join("test.data"), &mut iter::empty::<Record>(), 10, None).unwrap();
     }
 
     #[test]
@@ -417,6 +433,11 @@ mod tests {
         }
 
         assert_eq!(num_records, count);
+    }
+
+    #[test]
+    fn test_iter_0_2() {
+        iterate(0, 2);
     }
 
     #[test]

@@ -2,11 +2,15 @@ use std::path::PathBuf;
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::borrow::Borrow;
 use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc::channel;
+use std::iter;
 use std::thread;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+
+use itertools::kmerge;
 
 use num_cpus;
 use record_file::RecordFile;
@@ -16,13 +20,15 @@ use record::Record;
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 
 const MAX_MEM_COUNT: usize = 1000;
+const GROUP_COUNT: u32 = 100;
 
 pub struct KVS {
     db_dir: PathBuf,
     cur_sstable_num: u64,
     wal_file: RecordFile,
+    mem_table: BTreeMap<Vec<u8>, Record>,
+    cur_sstable: SSTable,
     sstables: BTreeSet<SSTable>,
-    mem_table: BTreeMap<Vec<u8>, Record>
 }
 
 /// Gets the timestamp/epoch in ms
@@ -32,17 +38,35 @@ pub fn get_timestamp() -> u64 {
     return ts.as_secs() * 1000 + ts.subsec_nanos() as u64 / 1_000_000;
 }
 
+/// Takes an old file, deletes it, and renames the new to old
+fn update_file(old_file: &PathBuf, new_file: &PathBuf) -> Result<(), IOError> {
+    // remove the old one
+    fs::remove_file(old_file)?;
+
+    // rename the new to old
+    fs::rename(new_file, old_file)
+}
+
 /**
- * Files have the following meansings:
- * data.wal     - Write Ahead Log; journal of all put & deletes that are in mem_table
- * table_#.data - The various SSTables
+ * Files have the following meanings:
+ * data.wal       - Write Ahead Log; journal of all put & deletes that are in mem_table
+ * table.current  - SSTable with the merges from mem_table
+ * table-#.data   - SSTables without overlapping ranges
+ * *-new          - A new version of the file with the same name
  */
 
 impl KVS {
     /// Creates a new KVS given a directory to store the files
     pub fn new(db_dir: &PathBuf) -> Result<KVS, IOError> {
-        let wal_file_path = db_dir.join("data.wal");
-        let wal_file = RecordFile::new(&wal_file_path, WAL_HEADER)?;
+        let wal_file = RecordFile::new(&db_dir.join("data.wal"), WAL_HEADER)?;
+
+        let sstable_current_path = db_dir.join("table.current");
+
+        let sstable_current = if sstable_current_path.exists() {
+            SSTable::open(&sstable_current_path)
+        } else {
+            SSTable::new(&sstable_current_path, &mut iter::empty::<Record>(), GROUP_COUNT, None)
+        }.expect("Error opening current SSTable");
 
         let mut sstables = BTreeSet::<SSTable>::new();
 
@@ -64,8 +88,9 @@ impl KVS {
             db_dir: PathBuf::from(db_dir),
             cur_sstable_num: 0,
             wal_file: wal_file,
+            mem_table: BTreeMap::new(),
+            cur_sstable: sstable_current,
             sstables: sstables,
-            mem_table: BTreeMap::new()
         })
     }
 
@@ -78,28 +103,34 @@ impl KVS {
             return Ok( () ); // don't need to do anything if we don't have values yet
         }
 
-        // create a new SSTable
-        let sstable_path = self.db_dir.join(format!("table_{}.data", self.cur_sstable_num));
-        self.cur_sstable_num += 1; // bump our count
+        // update the reference to our current SSTable
+        self.cur_sstable = {
+            // create a new SSTable
+            let sstable_path = self.db_dir.join("table.current-new");
 
-        let sstable = SSTable::new(&sstable_path, &mut self.mem_table.values(), MAX_MEM_COUNT as u32, None)?;
+            // create the merged iterator
+            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
+            let ss_it: Box<Iterator<Item=Record>> = Box::new(self.cur_sstable.iter());
 
-        self.sstables.insert(sstable);
+            let mut it = kmerge(vec![mem_it, ss_it]);
+
+            let new_sstable = SSTable::new(&sstable_path, &mut it, MAX_MEM_COUNT as u32, None)?;
+
+            // remove the old file, and rename the new -> old
+            update_file(&self.db_dir.join("table.current"), &sstable_path)?;
+
+            new_sstable
+        };
 
         // remove everything in the mem_table
         self.mem_table.clear();
 
-        debug!("MEM TABLE: {}", self.mem_table.len());
-
-        // rename the WAL file
-        fs::rename(self.db_dir.join("data.wal"), self.db_dir.join("old_data.wal"))?;
-
-        // open a new version
-        let wal_file_path = self.db_dir.join("data.wal");
+        // open a new WAL file
+        let wal_file_path = self.db_dir.join("data.wal-new");
         self.wal_file = RecordFile::new(&wal_file_path, WAL_HEADER)?;
 
-        // remove the old one
-        fs::remove_file(self.db_dir.join("old_data.wal"))?;
+        // remove the old file, and rename the new -> old
+        update_file(&self.db_dir.join("data.wal"), &wal_file_path)?;
 
         info!("Leaving flush");
 
@@ -123,7 +154,12 @@ impl KVS {
             };
         }
 
-        // need to go to SSTables
+        // next check the current SSTable
+        if let Some(rec) = self.cur_sstable.get(key.to_vec()).expect("Error reading from SSTable") {
+            return Some(rec.get_value());
+        }
+
+        // finally, need to go to SSTables
         for sstable in self.sstables.iter() {
             debug!("SSTABLE: {:?}", sstable);
 
@@ -138,14 +174,13 @@ impl KVS {
 
             // sanity check
             if rec.is_delete() {
-                warn!("Found deleted key in SSTable: {:?}", sstable);
-                return None;
+                panic!("Found deleted key in SSTable: {:?}", sstable);
             }
 
             return Some(rec.get_value());
         }
 
-        None
+        None // if we get to here, we don't have it
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), IOError> {
@@ -161,6 +196,7 @@ impl KVS {
         // check to see if we need to flush to disk
         if self.mem_table.len() >= MAX_MEM_COUNT {
             self.flush();
+//            self.compact(); // this won't do anything if it's not needed
         }
 
         Ok( () )
@@ -247,6 +283,8 @@ mod tests {
 
         kvs.flush().unwrap();
 
-        debug!("GOT: {:?}", kvs.get(&key.to_vec()));
+        let ret = kvs.get(&key.to_vec());
+
+        assert_eq!(value, ret.unwrap().as_slice());
     }
 }
