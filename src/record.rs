@@ -40,7 +40,7 @@ impl Record {
         self.ttl <= ts
     }
 
-    pub fn get_created(&self) -> u64 {
+    pub fn created(&self) -> u64 {
         self.created
     }
 
@@ -48,11 +48,11 @@ impl Record {
         self.value.is_none()
     }
 
-    pub fn get_key(&self) -> Vec<u8> {
+    pub fn key(&self) -> Vec<u8> {
         self.key.to_owned()
     }
 
-    pub fn get_value(&self) -> Vec<u8> {
+    pub fn value(&self) -> Vec<u8> {
         self.value.to_owned().expect("Tried to get value of delete record")
     }
 }
