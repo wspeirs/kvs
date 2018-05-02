@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use itertools::kmerge;
+use itertools::Itertools;
 
 use num_cpus;
 use record_file::RecordFile;
@@ -19,8 +20,10 @@ use record::Record;
 
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 
-const MAX_MEM_COUNT: usize = 1000;
-const GROUP_COUNT: u32 = 100;
+// constants for now
+const MAX_MEM_COUNT: usize = 100;
+const GROUP_COUNT: u32 = 10;
+const MAX_FILE_COUNT: usize = 4;
 
 pub struct KVS {
     db_dir: PathBuf,
@@ -47,6 +50,16 @@ fn update_file(old_file: &PathBuf, new_file: &PathBuf) -> Result<(), IOError> {
     fs::rename(new_file, old_file)
 }
 
+/// Used to coalesce records during iteration
+fn coalesce_records(prev: Record, curr: Record) -> Result<Record, (Record, Record)> {
+    // we always go with the newest timestamp
+    if prev.key() == curr.key() {
+        Ok(if prev.created() > curr.created() { prev } else { curr })
+    } else {
+        Err( (prev, curr) )
+    }
+}
+
 /**
  * Files have the following meanings:
  * data.wal       - Write Ahead Log; journal of all put & deletes that are in mem_table
@@ -54,7 +67,6 @@ fn update_file(old_file: &PathBuf, new_file: &PathBuf) -> Result<(), IOError> {
  * table-#.data   - SSTables without overlapping ranges
  * *-new          - A new version of the file with the same name
  */
-
 impl KVS {
     /// Creates a new KVS given a directory to store the files
     pub fn new(db_dir: &PathBuf) -> Result<KVS, IOError> {
@@ -98,9 +110,9 @@ impl KVS {
     fn flush(&mut self) -> Result<(), IOError> {
         info!("Starting a flush");
 
-        if self.mem_table.len() == 0 {
-            debug!("No records in mem_table");
-            return Ok( () ); // don't need to do anything if we don't have values yet
+        if self.mem_table.len() < MAX_MEM_COUNT {
+            debug!("Too few records in mem_table");
+            return Ok( () ); // don't need to do anything yet
         }
 
         // update the reference to our current SSTable
@@ -108,11 +120,11 @@ impl KVS {
             // create a new SSTable
             let sstable_path = self.db_dir.join("table.current-new");
 
-            // create the merged iterator
             let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
             let ss_it: Box<Iterator<Item=Record>> = Box::new(self.cur_sstable.iter());
 
-            let mut it = kmerge(vec![mem_it, ss_it]);
+            // create an iterator that merge-sorts and also coalesces out similar records
+            let mut it = kmerge(vec![mem_it, ss_it]).coalesce(coalesce_records);
 
             let new_sstable = SSTable::new(&sstable_path, &mut it, MAX_MEM_COUNT as u32, None)?;
 
@@ -137,6 +149,64 @@ impl KVS {
         Ok( () )
     }
 
+    fn compact(&mut self) -> Result<(), IOError> {
+        info!("Starting a compaction");
+
+        // we wait until we have enough records for every file to get MAX_MEM_COUNT
+        if self.mem_table.len() as u64 + self.cur_sstable.record_count() < (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64 {
+            info!("Not enough records for compact: {} < {}", self.mem_table.len() as u64 + self.cur_sstable.record_count(), (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64);
+            return Ok( () )
+        }
+
+        // create iterators for all the SSTables and the mem_table
+        self.sstables = {
+            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
+            let ss_cur_it: Box<Iterator<Item=Record>> = Box::new(self.cur_sstable.iter());
+            let mut ss_its = Vec::with_capacity(MAX_FILE_COUNT + 2);
+            let mut record_count = self.mem_table.len() as u64 + self.cur_sstable.record_count();
+
+            ss_its.push(mem_it);
+            ss_its.push(ss_cur_it);
+
+            for sstable in self.sstables.iter() {
+                record_count += sstable.record_count();
+                ss_its.push(Box::new(sstable.iter()));
+            }
+
+            let mut it = kmerge(ss_its).coalesce(coalesce_records);
+
+            let records_per_file = record_count / MAX_FILE_COUNT as u64;
+
+            debug!("RECORDS PER FILE: {} = {} / {}", records_per_file, record_count, MAX_FILE_COUNT as u64);
+
+            let mut new_sstables = BTreeSet::<SSTable>::new();
+
+            // create all the tables but the last one
+            for _i in 0..MAX_FILE_COUNT-1 {
+                let sstable_path = self.db_dir.join(format!("table-{}.data", self.cur_sstable_num));
+                self.cur_sstable_num += 1;
+
+                new_sstables.insert(SSTable::new(&sstable_path, &mut it, MAX_MEM_COUNT as u32, Some(records_per_file))?);
+            }
+
+            // the last one gets all the rest of the records
+            let sstable_path = self.db_dir.join(format!("table-{}.data", self.cur_sstable_num));
+            self.cur_sstable_num += 1;
+
+            new_sstables.insert(SSTable::new(&sstable_path, &mut it, MAX_MEM_COUNT as u32, None)?);
+
+            new_sstables
+        };
+
+        // remove the current SSTable
+        fs::remove_file(self.db_dir.join("table.current"))?;
+
+        // remove everything from the mem_table
+        self.mem_table.clear();
+
+        Ok( () )
+    }
+
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
         let cur_time = get_timestamp();
 
@@ -150,13 +220,13 @@ impl KVS {
             return if rec.is_expired(cur_time) || rec.is_delete() {
                 None
             } else {
-                Some(rec.get_value())
+                Some(rec.value())
             };
         }
 
         // next check the current SSTable
         if let Some(rec) = self.cur_sstable.get(key.to_vec()).expect("Error reading from SSTable") {
-            return Some(rec.get_value());
+            return Some(rec.value());
         }
 
         // finally, need to go to SSTables
@@ -177,7 +247,7 @@ impl KVS {
                 panic!("Found deleted key in SSTable: {:?}", sstable);
             }
 
-            return Some(rec.get_value());
+            return Some(rec.value());
         }
 
         None // if we get to here, we don't have it
@@ -195,8 +265,12 @@ impl KVS {
 
         // check to see if we need to flush to disk
         if self.mem_table.len() >= MAX_MEM_COUNT {
+            // compact won't do anything if it's not needed,
+            // but will take care of mem_table if we hit a threshold
+            self.compact();
+
+            // flush can be safely called after compact
             self.flush();
-//            self.compact(); // this won't do anything if it's not needed
         }
 
         Ok( () )
@@ -217,6 +291,8 @@ impl Drop for KVS {
 #[cfg(test)]
 mod tests {
     use kvs::KVS;
+    use kvs::MAX_MEM_COUNT;
+    use kvs::MAX_FILE_COUNT;
     use std::path::PathBuf;
     use std::thread;
     use std::time;
@@ -224,9 +300,11 @@ mod tests {
     use std::fs::create_dir;
     use simple_logger;
 
+    use std::sync::{Once, ONCE_INIT};
+    static LOGGER_INIT: Once = ONCE_INIT;
 
     fn gen_dir() -> PathBuf {
-        simple_logger::init().unwrap(); // this will panic on error
+        LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
         let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
         let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
@@ -242,6 +320,23 @@ mod tests {
     fn new() {
         let db_dir = gen_dir();
         let kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+    }
+
+    #[test]
+    fn get() {
+        let db_dir = gen_dir();
+        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+
+        let key = "KEY".as_bytes();
+        let value = "VALUE".as_bytes();
+
+        kvs.put(key.to_vec(), value.to_vec()).unwrap();
+
+        kvs.flush().unwrap();
+
+        let ret = kvs.get(&key.to_vec());
+
+        assert_eq!(value, ret.unwrap().as_slice());
     }
 
     #[test]
@@ -262,7 +357,7 @@ mod tests {
         let db_dir = gen_dir();
         let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
 
-        for i in 0..1001 {
+        for i in 0..MAX_MEM_COUNT+1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
             let key = format!("KEY_{}", rnd).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
@@ -272,19 +367,18 @@ mod tests {
     }
 
     #[test]
-    fn get() {
+    fn compact() {
         let db_dir = gen_dir();
         let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
 
-        let key = "KEY".as_bytes();
-        let value = "VALUE".as_bytes();
+        for i in 0..MAX_MEM_COUNT*MAX_FILE_COUNT + 1 {
+            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let key = format!("KEY_{}", rnd).as_bytes().to_vec();
+            let value = rnd.as_bytes().to_vec();
 
-        kvs.put(key.to_vec(), value.to_vec()).unwrap();
+            kvs.put(key, value).unwrap();
+        }
 
-        kvs.flush().unwrap();
-
-        let ret = kvs.get(&key.to_vec());
-
-        assert_eq!(value, ret.unwrap().as_slice());
+        kvs.compact();
     }
 }
