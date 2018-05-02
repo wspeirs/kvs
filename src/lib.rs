@@ -29,3 +29,5 @@ use std::mem;
 const U32_SIZE :usize = mem::size_of::<u32>();
 const U64_SIZE :usize = mem::size_of::<u64>();
 
+#[cfg(test)] use std::sync::{Once, ONCE_INIT};
+#[cfg(test)] static LOGGER_INIT: Once = ONCE_INIT;

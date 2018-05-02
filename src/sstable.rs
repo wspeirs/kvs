@@ -329,10 +329,7 @@ mod tests {
     use std::fs::create_dir;
     use simple_logger;
     use serde_utils::serialize_u64_exact;
-
-    use std::sync::{Once, ONCE_INIT};
-    static LOGGER_INIT: Once = ONCE_INIT;
-
+    use ::LOGGER_INIT;
 
     fn gen_dir() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error

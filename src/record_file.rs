@@ -384,9 +384,7 @@ mod tests {
     use std::fs::remove_file;
     use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
     use rand::{thread_rng, Rng};
-
-    use std::sync::{Once, ONCE_INIT};
-    static LOGGER_INIT: Once = ONCE_INIT;
+    use ::LOGGER_INIT;
 
     fn gen_file() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error

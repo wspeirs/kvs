@@ -299,9 +299,7 @@ mod tests {
     use rand::{thread_rng, Rng};
     use std::fs::create_dir;
     use simple_logger;
-
-    use std::sync::{Once, ONCE_INIT};
-    static LOGGER_INIT: Once = ONCE_INIT;
+    use ::LOGGER_INIT;
 
     fn gen_dir() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
