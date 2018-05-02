@@ -383,13 +383,27 @@ mod tests {
     use std::path::PathBuf;
     use std::fs::remove_file;
     use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
+    use rand::{thread_rng, Rng};
+
+    use std::sync::{Once, ONCE_INIT};
+    static LOGGER_INIT: Once = ONCE_INIT;
+
+    fn gen_file() -> PathBuf {
+        LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
+
+        let tmp_name: String = thread_rng().gen_ascii_chars().take(6).collect();
+        let ret_file = PathBuf::from("/tmp").join(format!("rec_file_{}.data", tmp_name));
+
+        debug!("CREATING TMP FILE: {:?}", ret_file);
+
+        return ret_file;
+    }
 
     #[test]
     fn new() {
-        simple_logger::init().unwrap(); // this will panic on error
-        remove_file("/tmp/test.data");
-        let mut rec_file =
-            RecordFile::new(&PathBuf::from("/tmp/test.data"), "ABCD".as_bytes()).unwrap();
+        let file = gen_file();
+
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
 
         rec_file.fd.seek(SeekFrom::End(0));
         rec_file.fd.write("TEST".as_bytes());
@@ -397,10 +411,9 @@ mod tests {
 
     #[test]
     fn append() {
-        simple_logger::init().unwrap(); // this will panic on error
-        remove_file("/tmp/test.data");
-        let mut rec_file =
-            RecordFile::new(&PathBuf::from("/tmp/test.data"), "ABCD".as_bytes()).unwrap();
+        let file = gen_file();
+
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
 
         // put this here to see if it messes with stuff
         rec_file.fd.seek(SeekFrom::End(0));
@@ -417,10 +430,9 @@ mod tests {
 
     #[test]
     fn read_at() {
-        simple_logger::init().unwrap(); // this will panic on error
-        remove_file("/tmp/test.data");
-        let mut rec_file =
-            RecordFile::new(&PathBuf::from("/tmp/test.data"), "ABCD".as_bytes()).unwrap();
+        let file = gen_file();
+
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
         let rec = "THE_RECORD".as_bytes();
 
         rec_file.append(rec).unwrap();
@@ -433,10 +445,9 @@ mod tests {
 
     #[test]
     fn iterate() {
-        simple_logger::init().unwrap(); // this will panic on error
-        remove_file("/tmp/test.data");
-        let mut rec_file =
-            RecordFile::new(&PathBuf::from("/tmp/test.data"), "ABCD".as_bytes()).unwrap();
+        let file = gen_file();
+
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
 
         let rec = "THE_RECORD".as_bytes();
 
