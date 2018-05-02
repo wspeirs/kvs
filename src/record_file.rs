@@ -209,11 +209,8 @@ impl RecordFile {
 
 impl Drop for RecordFile {
     fn drop(&mut self) {
-//        self.fd.seek(SeekFrom::Start(self.header_len as u64)).unwrap();
-//        self.fd.write_u32::<LE>(self.record_count).unwrap(); // cannot return an error, so best attempt
-//        self.fd.write_u64::<LE>(self.last_record).unwrap(); // write out the end of the file
-//        self.fd.flush().unwrap();
-//
+        self.flush().unwrap();
+
         debug!("DROP: {:?}: records: {}; last record: {}", self.file_path, self.record_count, self.last_record);
     }
 }
@@ -405,6 +402,20 @@ mod tests {
 
         rec_file.fd.seek(SeekFrom::End(0));
         rec_file.fd.write("TEST".as_bytes());
+    }
+
+    #[test]
+    fn new_open() {
+        let file = gen_file();
+
+        {
+            let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+
+            rec_file.fd.seek(SeekFrom::End(0));
+            rec_file.fd.write("TEST".as_bytes());
+        }
+
+        RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
     }
 
     #[test]
