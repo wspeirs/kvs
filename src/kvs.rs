@@ -1,19 +1,13 @@
-use std::path::PathBuf;
-use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use std::borrow::Borrow;
-use std::sync::mpsc::{Sender, Receiver};
-use std::sync::mpsc::channel;
-use std::iter;
-use std::thread;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Error as IOError};
+use std::iter;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use itertools::kmerge;
 use itertools::Itertools;
 
-use num_cpus;
 use record_file::RecordFile;
 use sstable::SSTable;
 use record::Record;
@@ -111,7 +105,7 @@ impl KVS {
         fs::remove_file(&self.db_dir.join("data.wal"))?;
 
         // rename the new to old
-        fs::rename(wal_file_path, &self.db_dir.join("data.wal"));
+        fs::rename(wal_file_path, &self.db_dir.join("data.wal"))?;
 
         self.wal_file = RecordFile::new(&self.db_dir.join("data.wal"), WAL_HEADER)?;
 
@@ -147,7 +141,7 @@ impl KVS {
             fs::remove_file(&self.db_dir.join("table.current"))?;
 
             // rename the new to old
-            fs::rename(&sstable_path, &self.db_dir.join("table.current"));
+            fs::rename(&sstable_path, &self.db_dir.join("table.current"))?;
 
             SSTable::open(&sstable_path)?
         };
@@ -286,10 +280,10 @@ impl KVS {
         if self.mem_table.len() >= MAX_MEM_COUNT {
             // compact won't do anything if it's not needed,
             // but will take care of mem_table if we hit a threshold
-            self.compact();
+            self.compact()?;
 
             // flush can be safely called after compact
-            self.flush();
+            self.flush()?;
         }
 
         Ok( () )
@@ -303,7 +297,7 @@ impl KVS {
 impl Drop for KVS {
     fn drop(&mut self) {
         debug!("KVS Drop");
-        self.flush();
+        self.flush().expect("Error flushing to disk on Drop");
     }
 }
 

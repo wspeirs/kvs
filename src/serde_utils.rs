@@ -9,7 +9,7 @@ pub fn serialize_u64_exact(array: &Vec<u64>) -> Vec<u8> {
     let mut cursor = Cursor::new(ret);
 
     for a in array {
-        cursor.write_u64::<BE>(*a);
+        cursor.write_u64::<BE>(*a).expect("Error writing to cursor");
     }
 
     return cursor.into_inner();

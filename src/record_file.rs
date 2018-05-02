@@ -146,7 +146,7 @@ impl RecordFile {
     pub fn append_flush(&mut self, record: &[u8]) -> Result<u64, IOError> {
         let ret = self.append(record);
 
-        self.flush();
+        self.flush()?;
 
         ret
     }

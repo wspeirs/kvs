@@ -1,7 +1,4 @@
 use rmps::encode::to_vec;
-use rmps::decode::{from_slice, from_read};
-
-use serde::{Deserialize, Serialize};
 
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter, Result as FmtResult};

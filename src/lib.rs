@@ -3,7 +3,7 @@ extern crate log;
 
 extern crate byteorder;
 extern crate itertools;
-extern crate num_cpus;
+//extern crate num_cpus;
 extern crate positioned_io;
 extern crate rmp_serde as rmps;
 extern crate serde;

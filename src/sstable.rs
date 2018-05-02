@@ -1,15 +1,12 @@
 use rmps::encode::to_vec;
 use rmps::decode::from_slice;
 
-use serde::{Deserialize, Serialize};
-
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{Error as IOError, ErrorKind};
-use std::path::PathBuf;
-use std::cell::RefCell;
 use std::iter::IntoIterator;
+use std::path::PathBuf;
 
 use record_file::buf2string;
 use record_file::RecordFile;
@@ -87,9 +84,9 @@ impl SSTable {
         };
 
         let mut group_indices = vec![0x00 as u64; group_count as usize];
-        let mut cur_group_indices_offset = 0;
+        let mut cur_group_indices_offset;
         let mut cur_key :Vec<u8> = vec![];
-        let mut cur_ts = 0;
+        let mut cur_ts ;
 
         // make space for the record_group_indices
         let record_group_indices_buff = serialize_u64_exact(&group_indices);
