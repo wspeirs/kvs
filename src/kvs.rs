@@ -41,14 +41,6 @@ pub fn get_timestamp() -> u64 {
     return ts.as_secs() * 1000 + ts.subsec_nanos() as u64 / 1_000_000;
 }
 
-/// Takes an old file, deletes it, and renames the new to old
-fn update_file(old_file: &PathBuf, new_file: &PathBuf) -> Result<(), IOError> {
-    // remove the old one
-    fs::remove_file(old_file)?;
-
-    // rename the new to old
-    fs::rename(new_file, old_file)
-}
 
 /// Used to coalesce records during iteration
 fn coalesce_records(prev: Record, curr: Record) -> Result<Record, (Record, Record)> {
@@ -106,12 +98,32 @@ impl KVS {
         })
     }
 
-    /// flush the memtable to disk
+    /// Creates a new WAL file, deletes current WAL file, and renames the new to current
+    fn update_wal_file(&mut self) -> Result<(), IOError> {
+        let wal_file_path = self.db_dir.join("data.wal-new");
+
+        {
+            // create a new WAL file
+            RecordFile::new(&wal_file_path, WAL_HEADER)?;
+        }
+
+        // remove the old one
+        fs::remove_file(&self.db_dir.join("data.wal"))?;
+
+        // rename the new to old
+        fs::rename(wal_file_path, &self.db_dir.join("data.wal"));
+
+        self.wal_file = RecordFile::new(&self.db_dir.join("data.wal"), WAL_HEADER)?;
+
+        Ok( () )
+    }
+
+    /// flush the mem_table to disk
     fn flush(&mut self) -> Result<(), IOError> {
         info!("Starting a flush");
 
         if self.mem_table.len() < MAX_MEM_COUNT {
-            debug!("Too few records in mem_table");
+            debug!("Too few records in mem_table: {} < {}", self.mem_table.len(), MAX_MEM_COUNT);
             return Ok( () ); // don't need to do anything yet
         }
 
@@ -126,23 +138,25 @@ impl KVS {
             // create an iterator that merge-sorts and also coalesces out similar records
             let mut it = kmerge(vec![mem_it, ss_it]).coalesce(coalesce_records);
 
-            let new_sstable = SSTable::new(&sstable_path, &mut it, MAX_MEM_COUNT as u32, None)?;
+            {
+                SSTable::new(&sstable_path, &mut it, MAX_MEM_COUNT as u32, None)?;
+            }
 
             // remove the old file, and rename the new -> old
-            update_file(&self.db_dir.join("table.current"), &sstable_path)?;
+            // remove the old one
+            fs::remove_file(&self.db_dir.join("table.current"))?;
 
-            new_sstable
+            // rename the new to old
+            fs::rename(&sstable_path, &self.db_dir.join("table.current"));
+
+            SSTable::open(&sstable_path)?
         };
 
         // remove everything in the mem_table
         self.mem_table.clear();
 
-        // open a new WAL file
-        let wal_file_path = self.db_dir.join("data.wal-new");
-        self.wal_file = RecordFile::new(&wal_file_path, WAL_HEADER)?;
-
-        // remove the old file, and rename the new -> old
-        update_file(&self.db_dir.join("data.wal"), &wal_file_path)?;
+        // update the WAL file
+        self.update_wal_file()?;
 
         info!("Leaving flush");
 
@@ -203,6 +217,11 @@ impl KVS {
 
         // remove everything from the mem_table
         self.mem_table.clear();
+
+        // update the WAL file
+        self.update_wal_file()?;
+
+        info!("Leaving compact");
 
         Ok( () )
     }
@@ -283,6 +302,7 @@ impl KVS {
 
 impl Drop for KVS {
     fn drop(&mut self) {
+        debug!("KVS Drop");
         self.flush();
     }
 }
@@ -378,5 +398,37 @@ mod tests {
         }
 
         kvs.compact();
+    }
+
+    #[test]
+    fn compact2() {
+        let db_dir = gen_dir();
+
+        {
+            let mut kvs = KVS::new(&db_dir).unwrap();
+
+            for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+                let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+                let key = format!("KEY_{}", rnd).as_bytes().to_vec();
+                let value = rnd.as_bytes().to_vec();
+
+                kvs.put(key, value).unwrap();
+            }
+
+            kvs.compact();
+        }
+
+        let mut kvs = KVS::new(&db_dir).unwrap();
+
+        for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let key = format!("KEY_{}", rnd).as_bytes().to_vec();
+            let value = rnd.as_bytes().to_vec();
+
+            kvs.put(key, value).unwrap();
+        }
+
+        kvs.compact();
+
     }
 }
