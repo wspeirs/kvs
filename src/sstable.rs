@@ -63,7 +63,7 @@ impl SSTable {
     pub fn new<I, B>(file_path: &PathBuf,  records: &mut I, group_count: u32, count: Option<u64>) -> Result<SSTable, IOError>
         where I: Iterator<Item=B>, B: Borrow<Record>
     {
-        info!("New SSTable: {:?}", file_path);
+        info!("New SSTable: {:?} group_count: {} count: {:?}", file_path, group_count, count);
 
         assert_ne!(group_count, 0); // need at least 1 in the group
         if count.is_some() { assert_ne!(count.unwrap(), 0); }
@@ -97,13 +97,13 @@ impl SSTable {
 
         // keep fetching from this iterator
         while let Some(r) = records.next() {
-            let rec = r.borrow();
+            let rec :&Record = r.borrow();
 
             debug!("GOT REC: {:?}", rec);
 
             // quick sanity check to ensure we're in sorted order
-            if sstable_info.record_count != 0 && rec.get_key() <= cur_key {
-                panic!("Got records in un-sorted order: {} <= {}", buf2string(&rec.get_key()), buf2string(&cur_key));
+            if sstable_info.record_count != 0 && rec.key() <= cur_key {
+                panic!("Got records in un-sorted order: {} <= {}", buf2string(&rec.key()), buf2string(&cur_key));
             }
 
             // take care of our group_indices
@@ -130,8 +130,8 @@ impl SSTable {
             }
 
             // record our current key and ts for use later
-            cur_key = rec.get_key();
-            cur_ts = rec.get_created();
+            cur_key = rec.key();
+            cur_ts = rec.created();
 
             // the first time through we set the smallest key, and oldest time
             if sstable_info.record_count == 0 {
@@ -145,7 +145,8 @@ impl SSTable {
             sstable_info.record_count += 1;
 
             // break out if we've reached our limit
-            if count.is_some() && count.expect("Error unwrapping Some(count)") >= sstable_info.record_count {
+            if count.is_some() && count.expect("Error unwrapping Some(count)") <= sstable_info.record_count {
+                debug!("Read enough records: {} > {}", count.unwrap(), sstable_info.record_count);
                 break;
             }
         }
@@ -183,7 +184,7 @@ impl SSTable {
             let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
             let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
 
-            rec.get_key().cmp(&key)
+            rec.key().cmp(&key)
         });
 
         let start_offset = self.info.indices[match top_index_res {
@@ -209,7 +210,7 @@ impl SSTable {
             let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
             rec = from_slice(&rec_buff).expect("Error deserializing Record");
 
-            rec.get_key().cmp(&key)
+            rec.key().cmp(&key)
         });
 
         debug!("Group binary search: {:?}", group_index_res);
@@ -231,9 +232,11 @@ impl SSTable {
         }
     }
 
-    pub fn get_oldest_ts(&self) -> u64 {
+    pub fn oldest_ts(&self) -> u64 {
         self.info.oldest_ts
     }
+
+    pub fn record_count(&self) -> u64 { self.info.record_count }
 }
 
 impl Debug for SSTable {
@@ -327,9 +330,12 @@ mod tests {
     use simple_logger;
     use serde_utils::serialize_u64_exact;
 
+    use std::sync::{Once, ONCE_INIT};
+    static LOGGER_INIT: Once = ONCE_INIT;
+
 
     fn gen_dir() -> PathBuf {
-        simple_logger::init().unwrap(); // this will panic on error
+        LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
         let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
         let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
@@ -341,7 +347,7 @@ mod tests {
         return ret_dir;
     }
 
-    fn new_open(num_records: usize, group_size: u32) -> SSTable {
+    fn new_open(num_records: usize, group_size: u32, use_size: bool) -> SSTable {
         let db_dir = gen_dir();
         let mut records = vec![];
 
@@ -352,7 +358,7 @@ mod tests {
         }
 
         {
-            SSTable::new(&db_dir.join("test.data"), &mut records.iter(), group_size, None).unwrap();
+            SSTable::new(&db_dir.join("test.data"), &mut records.iter(), group_size, if use_size { Some(num_records as u64) } else { None }).unwrap();
         }
 
         SSTable::open(&db_dir.join("test.data")).unwrap()
@@ -367,26 +373,38 @@ mod tests {
 
     #[test]
     fn test_new_100_2() {
-        new_open(100, 2);
+        let f1 = new_open(100, 2, false);
+        let f2 = new_open(100, 2, true);
+
+        assert_eq!(f1.record_count(), f2.record_count());
     }
 
     #[test]
     fn test_new_10000_10() {
-        new_open(10000, 10);
+        let f1 = new_open(10000, 10, false);
+        let f2 = new_open(10000, 10, true);
+
+        assert_eq!(f1.record_count(), f2.record_count());
     }
 
     #[test]
     fn test_new_1_10() {
-        new_open(1, 10);
+        let f1 = new_open(1, 10, false);
+        let f2 = new_open(1, 10, true);
+
+        assert_eq!(f1.record_count(), f2.record_count());
     }
 
     #[test]
     fn test_new_1_1() {
-        new_open(1, 1);
+        let f1 = new_open(1, 1, false);
+        let f2 = new_open(1, 1, true);
+
+        assert_eq!(f1.record_count(), f2.record_count());
     }
 
     fn get(num_records: usize, group_size: u32) {
-        let sstable = new_open(num_records, group_size);
+        let sstable = new_open(num_records, group_size, false);
 
         debug!("GET TEST SSTABLE: {:?}", sstable);
 
@@ -421,7 +439,7 @@ mod tests {
     }
 
     fn iterate(num_records: usize, group_size: u32) {
-        let sstable = new_open(num_records, group_size);
+        let sstable = new_open(num_records, group_size, false);
 
         debug!("ITER TEST SSTABLE: {:?}", sstable);
 
