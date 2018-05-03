@@ -319,8 +319,6 @@ mod tests {
     use sstable::SSTable;
     use record::Record;
     use std::path::PathBuf;
-    use std::thread;
-    use std::time;
     use std::iter;
     use rand::{thread_rng, Rng};
     use std::fs::create_dir;
@@ -440,7 +438,7 @@ mod tests {
         let mut it = sstable.iter();
         let mut count = 0;
 
-        while let Some(rec) = it.next() {
+        while let Some(_rec) = it.next() {
             count += 1;
         }
 

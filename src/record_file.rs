@@ -378,8 +378,7 @@ mod tests {
 
     use simple_logger;
     use std::path::PathBuf;
-    use std::fs::remove_file;
-    use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom, Write};
     use rand::{thread_rng, Rng};
     use ::LOGGER_INIT;
 
@@ -400,8 +399,8 @@ mod tests {
 
         let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
 
-        rec_file.fd.seek(SeekFrom::End(0));
-        rec_file.fd.write("TEST".as_bytes());
+        rec_file.fd.seek(SeekFrom::End(0)).unwrap();
+        rec_file.fd.write("TEST".as_bytes()).unwrap();
     }
 
     #[test]
@@ -411,8 +410,8 @@ mod tests {
         {
             let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
 
-            rec_file.fd.seek(SeekFrom::End(0));
-            rec_file.fd.write("TEST".as_bytes());
+            rec_file.fd.seek(SeekFrom::End(0)).unwrap();
+            rec_file.fd.write("TEST".as_bytes()).unwrap();
         }
 
         RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
@@ -425,8 +424,8 @@ mod tests {
         let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
 
         // put this here to see if it messes with stuff
-        rec_file.fd.seek(SeekFrom::End(0));
-        rec_file.fd.write("TEST".as_bytes());
+        rec_file.fd.seek(SeekFrom::End(0)).unwrap();
+        rec_file.fd.write("TEST".as_bytes()).unwrap();
 
         let rec = "THE_RECORD".as_bytes();
 

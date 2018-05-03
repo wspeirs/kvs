@@ -5,6 +5,7 @@ extern crate byteorder;
 extern crate itertools;
 //extern crate num_cpus;
 extern crate positioned_io;
+extern crate regex;
 extern crate rmp_serde as rmps;
 extern crate serde;
 #[macro_use]

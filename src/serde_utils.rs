@@ -34,7 +34,6 @@ pub fn deserialize_u64_exact(buff: &Vec<u8>) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use serde_utils::{serialize_u64_exact, deserialize_u64_exact};
-    use record_file::buf2string;
 
     #[test]
     fn serialize() {

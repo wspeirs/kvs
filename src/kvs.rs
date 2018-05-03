@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use itertools::kmerge;
 use itertools::Itertools;
 
+use regex::Regex;
+
 use record_file::RecordFile;
 use sstable::SSTable;
 use record::Record;
@@ -68,6 +70,9 @@ impl KVS {
 
         let mut sstables = BTreeSet::<SSTable>::new();
 
+        let re = Regex::new(r"^table-(\d+).data$").unwrap();
+        let mut max_sstable_num : u64 = 0;
+
         // gather up all the SSTables in this directory
         for entry in fs::read_dir(db_dir)? {
             let entry = entry.expect("Error reading directory entry");
@@ -77,15 +82,25 @@ impl KVS {
                 continue
             }
 
-            if path.ends_with(".data") {
+            let file_name = path.file_name().expect("Error getting file name");
+            let captures = re.captures(file_name.to_str().expect("Error getting string for file name"));
+
+            if let Some(capture) = captures {
+                // add to our set of tables
                 sstables.insert(SSTable::open(&path)?);
-                //TODO: need to parse out the highest number we find here
+
+                // get the number of the table
+                let sstable_num = capture.get(1).expect("Error capturing SSTable number").as_str().parse::<u64>().expect("Error parsing number");
+
+                if sstable_num > max_sstable_num {
+                    max_sstable_num = sstable_num;
+                }
             }
         }
 
         return Ok(KVS {
             db_dir: PathBuf::from(db_dir),
-            cur_sstable_num: 0,
+            cur_sstable_num: max_sstable_num + 1,
             wal_file: wal_file,
             mem_table: BTreeMap::new(),
             cur_sstable: sstable_current,
@@ -319,8 +334,6 @@ mod tests {
     use kvs::MAX_MEM_COUNT;
     use kvs::MAX_FILE_COUNT;
     use std::path::PathBuf;
-    use std::thread;
-    use std::time;
     use rand::{thread_rng, Rng};
     use std::fs::create_dir;
     use simple_logger;
@@ -342,7 +355,7 @@ mod tests {
     #[test]
     fn new() {
         let db_dir = gen_dir();
-        let kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+        let _kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
     }
 
     #[test]
@@ -380,7 +393,7 @@ mod tests {
         let db_dir = gen_dir();
         let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
 
-        for i in 0..MAX_MEM_COUNT+1 {
+        for _i in 0..MAX_MEM_COUNT+1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
             let key = format!("KEY_{}", rnd).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
@@ -394,7 +407,7 @@ mod tests {
         let db_dir = gen_dir();
         let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
 
-        for i in 0..MAX_MEM_COUNT*MAX_FILE_COUNT + 1 {
+        for _i in 0..MAX_MEM_COUNT*MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
             let key = format!("KEY_{}", rnd).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
@@ -412,7 +425,7 @@ mod tests {
         {
             let mut kvs = KVS::new(&db_dir).unwrap();
 
-            for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+            for _i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
                 let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
                 let key = format!("KEY_{}", rnd).as_bytes().to_vec();
                 let value = rnd.as_bytes().to_vec();
@@ -425,7 +438,7 @@ mod tests {
 
         let mut kvs = KVS::new(&db_dir).unwrap();
 
-        for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+        for _i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
             let key = format!("KEY_{}", rnd).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
