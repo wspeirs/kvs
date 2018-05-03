@@ -16,14 +16,14 @@ pub struct Record {
 }
 
 impl Record {
-    pub fn new(key: Vec<u8>, value: Vec<u8>) -> Record {
+    pub fn new(key: Vec<u8>, value: Option<Vec<u8>>) -> Record {
         Record::new_with_ttl(key, value, u64::max_value())
     }
 
-    pub fn new_with_ttl(key: Vec<u8>, value: Vec<u8>, ttl: u64) -> Record {
+    pub fn new_with_ttl(key: Vec<u8>, value: Option<Vec<u8>>, ttl: u64) -> Record {
         Record {
             key: key,
-            value: Some(value),
+            value: value,
             created: get_timestamp(),
             ttl: ttl
         }

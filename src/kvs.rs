@@ -79,6 +79,7 @@ impl KVS {
 
             if path.ends_with(".data") {
                 sstables.insert(SSTable::open(&path)?);
+                //TODO: need to parse out the highest number we find here
             }
         }
 
@@ -143,7 +144,7 @@ impl KVS {
             // rename the new to old
             fs::rename(&sstable_path, &self.db_dir.join("table.current"))?;
 
-            SSTable::open(&sstable_path)?
+            SSTable::open(&self.db_dir.join("table.current"))?
         };
 
         // remove everything in the mem_table
@@ -266,15 +267,11 @@ impl KVS {
         None // if we get to here, we don't have it
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), IOError> {
-        info!("Called put: {:?}", key);
-
-        // create a record, and append to the WAL file
-        let rec = Record::new(key.to_vec(), value);
-        self.wal_file.append(&Record::serialize(&rec))?;
+    fn insert(&mut self, record: Record) -> Result<(), IOError> {
+        self.wal_file.append(&Record::serialize(&record))?;
 
         // insert into the mem_table
-        self.mem_table.insert(key, rec);
+        self.mem_table.insert(record.key(), record);
 
         // check to see if we need to flush to disk
         if self.mem_table.len() >= MAX_MEM_COUNT {
@@ -289,8 +286,22 @@ impl KVS {
         Ok( () )
     }
 
-    pub fn delete(&self, key: Vec<u8>) -> Option<Vec<u8>> {
-        None
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), IOError> {
+        info!("Called put: {:?}", key);
+
+        // create a record, and call insert
+        let rec = Record::new(key.to_vec(), Some(value));
+
+        self.insert(rec)
+    }
+
+    pub fn delete(&mut self, key: Vec<u8>) -> Result<(), IOError> {
+        info!("Called delete: {:?}", key);
+
+        // create a record, and call insert
+        let rec = Record::new(key.to_vec(), None);
+
+        self.insert(rec)
     }
 }
 
@@ -391,7 +402,7 @@ mod tests {
             kvs.put(key, value).unwrap();
         }
 
-        kvs.compact();
+        kvs.compact().unwrap();
     }
 
     #[test]
@@ -409,7 +420,7 @@ mod tests {
                 kvs.put(key, value).unwrap();
             }
 
-            kvs.compact();
+            kvs.compact().unwrap();
         }
 
         let mut kvs = KVS::new(&db_dir).unwrap();
@@ -422,7 +433,6 @@ mod tests {
             kvs.put(key, value).unwrap();
         }
 
-        kvs.compact();
-
+        kvs.compact().unwrap();
     }
 }

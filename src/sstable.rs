@@ -200,7 +200,7 @@ impl SSTable {
         group_indices = group_indices.into_iter().take_while(|i| *i != 0x00 as u64).collect::<Vec<_>>();
 
         // save the record so we don't need to re-read it
-        let mut rec :Record = Record::new(Vec::<u8>::new(), Vec::<u8>::new());
+        let mut rec :Record = Record::new(Vec::<u8>::new(), Some(Vec::<u8>::new()));
 
         // binary search through the group indices
         let group_index_res = group_indices.binary_search_by(|index| {
@@ -346,7 +346,7 @@ mod tests {
         let mut records = vec![];
 
         for i in 0..num_records {
-            let rec = Record::new(serialize_u64_exact(&vec![i as u64]), serialize_u64_exact(&vec![i as u64]));
+            let rec = Record::new(serialize_u64_exact(&vec![i as u64]), Some(serialize_u64_exact(&vec![i as u64])));
 
             records.push(rec);
         }
@@ -408,7 +408,7 @@ mod tests {
             let ret = sstable.get(serialize_u64_exact(&vec![i as u64])).unwrap();
 
             assert!(ret.is_some());
-            assert_eq!(ret.unwrap(), Record::new(serialize_u64_exact(&vec![i as u64]), serialize_u64_exact(&vec![i as u64])));
+            assert_eq!(ret.unwrap(), Record::new(serialize_u64_exact(&vec![i as u64]), Some(serialize_u64_exact(&vec![i as u64]))));
         }
     }
 
