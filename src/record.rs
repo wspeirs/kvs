@@ -1,4 +1,5 @@
 use rmps::encode::to_vec;
+use rmps::decode::from_slice;
 
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
@@ -30,7 +31,11 @@ impl Record {
     }
 
     pub fn serialize(rec: &Record) -> Vec<u8> {
-        return to_vec(rec).unwrap(); // should handle this better
+        return to_vec(rec).expect("Error serializing record");
+    }
+
+    pub fn deserialize(bytes: Vec<u8>) -> Record {
+        return from_slice(&bytes).expect("Error deserializing record");
     }
 
     pub fn is_expired(&self, ts: u64) -> bool {
