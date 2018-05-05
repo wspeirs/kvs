@@ -233,9 +233,11 @@ impl KVS {
                 ss_its.push(Box::new(sstable.iter()));
             }
 
+            let cur_time = get_timestamp();
+
             let mut it =
                 kmerge(ss_its).coalesce(coalesce_records).filter(|rec| {
-                    !rec.is_delete() // remove all deletes
+                    !rec.is_delete() && !rec.is_expired(cur_time) // remove all deleted and expired
                 });
 
             let records_per_file = record_count / MAX_FILE_COUNT as u64;
@@ -303,7 +305,12 @@ impl KVS {
 
         // next check the current SSTable
         if let Some(rec) = self.cur_sstable.get(key.to_vec()).expect("Error reading from SSTable") {
-            return Some(rec.value());
+            return if rec.is_expired(cur_time) || rec.is_delete() {
+                debug!("Found expired or deleted key");
+                None
+            } else {
+                Some(rec.value())
+            };
         }
 
         // finally, need to go to SSTables
@@ -355,7 +362,7 @@ impl KVS {
         self.insert(rec)
     }
 
-    pub fn delete(&mut self, key: Vec<u8>) {
+    pub fn delete(&mut self, key: &Vec<u8>) {
         info!("Called delete: {:?}", key);
 
         // create a record, and call insert
@@ -523,6 +530,33 @@ mod tests {
     }
 
     #[test]
+    fn delete() {
+        let db_dir = gen_dir();
+        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+
+        let key = "KEY".as_bytes();
+        let value = "VALUE".as_bytes();
+
+        kvs.put(key.to_vec(), value.to_vec());
+
+        assert_eq!(kvs.count_estimate(), 1);
+
+        kvs.delete(&key.to_vec());
+
+        // should still be only 1 record
+        assert_eq!(kvs.count_estimate(), 1);
+
+        assert!(kvs.get(&key.to_vec()).is_none(), "Found key after deleting it!");
+
+        kvs.flush(false);
+
+        // should still be only 1 record
+        assert_eq!(kvs.count_estimate(), 1);
+
+        assert!(kvs.get(&key.to_vec()).is_none(), "Found key after deleting it!");
+    }
+
+    #[test]
     fn put_close_open_get() {
         let db_dir = gen_dir();
 
@@ -607,9 +641,6 @@ mod tests {
             kvs.put(key, value); // update our keys
         }
 
-        // this will be the size of the mem_table*files plus the two stragglers
-        assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT+2) as u64);
-
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let key = format!("KEY_{}", i).as_bytes().to_vec();
 
@@ -618,4 +649,39 @@ mod tests {
             assert_eq!(ret.unwrap(), format!("VALUE_{}", i).as_bytes().to_vec(), "Didn't get update for key: {}", i);
         }
     }
+
+    #[test]
+    fn put_compact_delete_get() {
+        let db_dir = gen_dir();
+
+        let mut kvs = KVS::new(&db_dir).unwrap();
+
+        for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let key = format!("KEY_{}", i).as_bytes().to_vec();
+            let value = rnd.as_bytes().to_vec();
+
+            kvs.put(key, value);
+        }
+
+        // compact would have happened here
+        assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
+
+        for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+            let key = format!("KEY_{}", i).as_bytes().to_vec();
+
+            kvs.delete(&key); // delete our key
+        }
+
+        // compact would happen here
+
+        for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
+            let key = format!("KEY_{}", i).as_bytes().to_vec();
+
+            let ret = kvs.get(&key);
+            assert!(ret.is_none(), "Found deleted key: {}", i);
+        }
+    }
+
+
 }
