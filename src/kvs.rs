@@ -215,6 +215,9 @@ impl KVS {
             return false;
         }
 
+        // save off the file paths to the old SSTables as it's not nice to delete files that are still open
+        let sstable_paths = self.sstables.iter().map(|table| table.file_path()).collect::<Vec<_>>();
+
         // create iterators for all the SSTables and the mem_table
         self.sstables = {
             let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
@@ -255,6 +258,11 @@ impl KVS {
 
             new_sstables
         };
+
+        // remove all the old SSTables
+        for sstable_path in sstable_paths.iter() {
+            fs::remove_file(&sstable_path).expect(&format!("Error removing old SSTable: {:?}", sstable_path));
+        }
 
         // remove the current SSTable
         fs::remove_file(self.cur_sstable_path(false)).expect(&format!("Error removing current SSTable: {:?}", self.cur_sstable_path(false)));
@@ -490,7 +498,11 @@ mod tests {
                 kvs.put(key, value);
             }
 
+            assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
+
             kvs.compact();
+
+            assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
         }
 
         let mut kvs = KVS::new(&db_dir).unwrap();
@@ -503,7 +515,11 @@ mod tests {
             kvs.put(key, value);
         }
 
+        assert_eq!(kvs.count_estimate(), ((MAX_MEM_COUNT*MAX_FILE_COUNT+1)*2) as u64);
+
         kvs.compact();
+
+        assert_eq!(kvs.count_estimate(), ((MAX_MEM_COUNT*MAX_FILE_COUNT+1)*2) as u64);
     }
 
     #[test]
@@ -558,6 +574,8 @@ mod tests {
             kvs.put(key, value);
         }
 
+        assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
+
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let key = format!("KEY_{}", i).as_bytes().to_vec();
 
@@ -580,6 +598,7 @@ mod tests {
         }
 
         // compact would have happened here
+        assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let key = format!("KEY_{}", i).as_bytes().to_vec();
@@ -587,6 +606,9 @@ mod tests {
 
             kvs.put(key, value); // update our keys
         }
+
+        // this will be the size of the mem_table*files plus the two stragglers
+        assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT+2) as u64);
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let key = format!("KEY_{}", i).as_bytes().to_vec();
