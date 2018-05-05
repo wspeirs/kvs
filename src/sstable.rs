@@ -43,7 +43,7 @@ impl SSTable {
 
         let rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
 
-        let info = from_slice(&rec_file.get_last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo");
+        let info = from_slice(&rec_file.last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo");
 
         let sstable = SSTable { rec_file: rec_file, info: info };
 
@@ -96,7 +96,7 @@ impl SSTable {
         while let Some(r) = records.next() {
             let rec :&Record = r.borrow();
 
-            debug!("GOT REC: {:?}", rec);
+//            debug!("GOT REC: {:?}", rec);
 
             // quick sanity check to ensure we're in sorted order
             if sstable_info.record_count != 0 && rec.key() <= cur_key {
@@ -301,13 +301,15 @@ impl PartialOrd for SSTable {
 
 impl Ord for SSTable {
     fn cmp(&self, other: &SSTable) -> Ordering {
-        self.info.oldest_ts.cmp(&other.info.oldest_ts)
+        self.info.smallest_key.cmp(&other.info.smallest_key)
     }
 }
 
 impl PartialEq for SSTable {
     fn eq(&self, other: &SSTable) -> bool {
-        self.info.oldest_ts == other.info.oldest_ts
+        self.info.smallest_key == other.info.smallest_key &&
+        self.info.largest_key  == other.info.largest_key &&
+        self.info.record_count == other.info.record_count
     }
 }
 

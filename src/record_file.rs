@@ -121,7 +121,11 @@ impl RecordFile {
         })
     }
 
-    pub fn get_last_record(&self) -> Result<Vec<u8>, IOError> {
+    pub fn record_count(&self) -> u32 {
+        return self.record_count;
+    }
+
+    pub fn last_record(&self) -> Result<Vec<u8>, IOError> {
         self.read_at(self.last_record)
     }
 
@@ -131,7 +135,7 @@ impl RecordFile {
         let rec_loc = self.fd.seek(SeekFrom::End(0))?;
         let rec_size = record.len();
 
-        debug!("WROTE RECORD AT {}: {}", rec_loc, rec_to_string(rec_size as u32, record));
+//        debug!("WROTE RECORD AT {}: {}", rec_loc, rec_to_string(rec_size as u32, record));
 
         self.fd.write_u32::<LE>(rec_size as u32)?;
         self.fd.write(record)?;
@@ -165,11 +169,11 @@ impl RecordFile {
 
         self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
 
-        debug!(
-            "READ RECORD FROM {}: {}",
-            file_offset,
-            rec_to_string(rec_size as u32, &rec_buff)
-        );
+//        debug!(
+//            "READ RECORD FROM {}: {}",
+//            file_offset,
+//            rec_to_string(rec_size as u32, &rec_buff)
+//        );
 
         Ok(rec_buff)
     }
@@ -185,7 +189,7 @@ impl RecordFile {
         self.fd.write_u32_at::<LE>(file_offset, record.len() as u32)?;
         self.fd.write_all_at(file_offset + U32_SIZE as u64, &record)?;
 
-        debug!("WROTE RECORD AT {}: {}", file_offset, rec_to_string(record.len() as u32, record));
+//        debug!("WROTE RECORD AT {}: {}", file_offset, rec_to_string(record.len() as u32, record));
 
         Ok( () )
     }
