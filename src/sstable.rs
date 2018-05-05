@@ -234,6 +234,8 @@ impl SSTable {
     }
 
     pub fn record_count(&self) -> u64 { self.info.record_count }
+
+    pub fn file_path(&self) -> PathBuf { self.rec_file.file_path() }
 }
 
 impl Debug for SSTable {

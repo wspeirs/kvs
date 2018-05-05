@@ -122,7 +122,11 @@ impl RecordFile {
     }
 
     pub fn record_count(&self) -> u32 {
-        return self.record_count;
+        self.record_count
+    }
+
+    pub fn file_path(&self) -> PathBuf {
+        self.file_path.clone()
     }
 
     pub fn last_record(&self) -> Result<Vec<u8>, IOError> {
