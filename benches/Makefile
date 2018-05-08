@@ -1,7 +1,7 @@
 GPP   = /usr/bin/g++
 GCC   = /usr/bin/gcc
-FLAGS = -std=c++11 -W -Wall -g -O3
-LIBS  = libleveldb_v1.20.a -lpthread
+FLAGS = -std=c++11 -W -Wall -g # -O3
+LIBS  = libleveldb_v1.20.a librocksdb_v5.12.4.a -lpthread
 INC   = -I.
 EXEC  = benchmarks
 
