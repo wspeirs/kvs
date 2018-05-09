@@ -47,7 +47,7 @@ impl SSTable {
 
         let sstable = SSTable { rec_file: rec_file, info: info };
 
-        info!("Opened SSTable: {:?}", sstable);
+        debug!("Opened SSTable: {:?}", sstable);
 
         Ok(sstable)
     }
@@ -60,7 +60,7 @@ impl SSTable {
     pub fn new<I, B>(file_path: &PathBuf,  records: &mut I, group_count: u32, count: Option<u64>) -> Result<SSTable, IOError>
         where I: Iterator<Item=B>, B: Borrow<Record>
     {
-        info!("New SSTable: {:?} group_count: {} count: {:?}", file_path, group_count, count);
+        debug!("New SSTable: {:?} group_count: {} count: {:?}", file_path, group_count, count);
 
         assert_ne!(group_count, 0); // need at least 1 in the group
         if count.is_some() { assert_ne!(count.unwrap(), 0); }
@@ -107,7 +107,7 @@ impl SSTable {
             if sstable_info.record_count != 0 && sstable_info.record_count % group_count as u64 == 0 {
                 // write the current record_group_indices to disk
                 let record_group_indices_buff = serialize_u64_exact(&group_indices);
-                rec_file.write_at(cur_group_indices_offset, &record_group_indices_buff, true)?;
+                rec_file.write_at(cur_group_indices_offset, &record_group_indices_buff, false)?;
 
                 // reset the record_group_indices, and write it to the new location
                 group_indices = vec![0x00 as u64; group_count as usize];
@@ -150,7 +150,7 @@ impl SSTable {
 
         // write-out our current group_indices
         let record_group_indices_buff = serialize_u64_exact(&group_indices);
-        rec_file.write_at(cur_group_indices_offset, &record_group_indices_buff, true)?;
+        rec_file.write_at(cur_group_indices_offset, &record_group_indices_buff, false)?;
 
         // update our largest key
         sstable_info.largest_key = cur_key;
@@ -165,7 +165,7 @@ impl SSTable {
             info: sstable_info
         };
 
-        info!("Created SSTable: {:?}", sstable);
+        debug!("Created SSTable: {:?}", sstable);
 
         Ok(sstable)
     }

@@ -17,9 +17,9 @@ use record::Record;
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 
 // constants for now
-const MAX_MEM_COUNT: usize = 10;
-const GROUP_COUNT: u32 = 5;
-const MAX_FILE_COUNT: usize = 4;
+const MAX_MEM_COUNT: usize = 110_000;
+const GROUP_COUNT: u32 = 1_000;
+const MAX_FILE_COUNT: usize = 10;
 
 pub struct KVS {
     db_dir: PathBuf,
@@ -160,7 +160,7 @@ impl KVS {
     /// flush the mem_table to disk
     /// return: true if the flush occured
     fn flush(&mut self, check_size: bool) -> bool {
-        info!("Starting a flush");
+        debug!("Starting a flush");
 
         if check_size && self.mem_table.len() < MAX_MEM_COUNT {
             debug!("Too few records in mem_table: {} < {}", self.mem_table.len(), MAX_MEM_COUNT);
@@ -199,7 +199,7 @@ impl KVS {
         // update the WAL file
         self.update_wal_file();
 
-        info!("Leaving flush");
+        debug!("Leaving flush");
 
         true
     }
@@ -207,11 +207,11 @@ impl KVS {
     /// Compacts the mem_table, current_sstable, and sstables into new sstables
     /// return: true if the compaction actually ran
     fn compact(&mut self) -> bool {
-        info!("Starting a compaction");
+        debug!("Starting a compaction");
 
         // we wait until we have enough records for every file to get MAX_MEM_COUNT
         if self.mem_table.len() as u64 + self.cur_sstable.record_count() < (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64 {
-            info!("Not enough records for compact: {} < {}", self.mem_table.len() as u64 + self.cur_sstable.record_count(), (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64);
+            debug!("Not enough records for compact: {} < {}", self.mem_table.len() as u64 + self.cur_sstable.record_count(), (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64);
             return false;
         }
 
@@ -278,13 +278,13 @@ impl KVS {
         // update the WAL file
         self.update_wal_file();
 
-        info!("Leaving compact");
+        debug!("Leaving compact");
 
         true
     }
 
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
-        info!("Called get: {:?}", key);
+        debug!("Called get: {:?}", key);
 
         let cur_time = get_timestamp();
 
@@ -354,7 +354,7 @@ impl KVS {
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        info!("Called put: {:?}", key);
+        debug!("Called put: {:?}", key);
 
         // create a record, and call insert
         let rec = Record::new(key.to_vec(), Some(value));
@@ -363,7 +363,7 @@ impl KVS {
     }
 
     pub fn delete(&mut self, key: &Vec<u8>) {
-        info!("Called delete: {:?}", key);
+        debug!("Called delete: {:?}", key);
 
         // create a record, and call insert
         let rec = Record::new(key.to_vec(), None);
