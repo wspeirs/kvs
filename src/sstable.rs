@@ -1,4 +1,4 @@
-use rmps::encode::to_vec;
+use rmps::encode::{to_vec, write};
 use rmps::decode::from_slice;
 
 use std::borrow::Borrow;
@@ -116,7 +116,7 @@ impl SSTable {
             }
 
             // append the record to the end of the file, without flushing
-            let loc = rec_file.append(&Record::serialize(rec))?;
+            let loc = rec_file.append_with(|mut w| rec.serialize(&mut w))?;
 
             // add to our group index
             group_indices[(sstable_info.record_count % group_count as u64) as usize] = loc;
@@ -179,7 +179,8 @@ impl SSTable {
         // binary search using the indices
         let top_index_res = self.info.indices.binary_search_by(|index| {
             let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
-            let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
+//            let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
+            let rec = Record::deserialize(rec_buff);
 
             rec.key().cmp(&key)
         });
@@ -205,7 +206,8 @@ impl SSTable {
         // binary search through the group indices
         let group_index_res = group_indices.binary_search_by(|index| {
             let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
-            rec = from_slice(&rec_buff).expect("Error deserializing Record");
+//            rec = from_slice(&rec_buff).expect("Error deserializing Record");
+            rec = Record::deserialize(rec_buff);
 
             rec.key().cmp(&key)
         });
@@ -276,10 +278,12 @@ impl<'a> Iterator for Iter<'a> {
         }
 
         let rec_buff = self.sstable.rec_file.read_at(self.cur_offset).expect("Error reading SSTable");
-        let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
+        let rec_buff_len = rec_buff.len();
+//        let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
+        let rec = Record::deserialize(rec_buff);
 
         self.cur_record += 1;
-        self.cur_offset += (rec_buff.len() + U32_SIZE) as u64;
+        self.cur_offset += (rec_buff_len + U32_SIZE) as u64;
 
         // need to skip over the group index records
         if self.cur_record % self.sstable.info.group_count as u64 == 0 {

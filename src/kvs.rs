@@ -338,7 +338,7 @@ impl KVS {
     }
 
     fn insert(&mut self, record: Record) {
-        self.wal_file.append(&Record::serialize(&record)).expect("Error writing to WAL file");
+        self.wal_file.append_with(|mut w| record.serialize(&mut w)).expect("Error writing to WAL file");
 
         // insert into the mem_table
         self.mem_table.insert(record.key(), record);
@@ -354,7 +354,7 @@ impl KVS {
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        debug!("Called put: {:?}", key);
+//        debug!("Called put: {:?}", key);
 
         // create a record, and call insert
         let rec = Record::new(key.to_vec(), Some(value));

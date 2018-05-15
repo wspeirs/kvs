@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::fs::{File, OpenOptions};
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::ops::Fn;
 use std::path::PathBuf;
 
 use U32_SIZE;
@@ -150,6 +151,17 @@ impl RecordFile {
         Ok(rec_loc)
     }
 
+    pub fn append_with<F>(&mut self, func: F) -> Result<u64, IOError> where F: Fn(Box<Write>) -> Result<u32, IOError> {
+        let rec_loc = self.fd.seek(SeekFrom::End(0))?;
+
+        func(Box::new(self.fd.try_clone()?))?; // let the function write the data
+
+        self.record_count += 1;
+        self.last_record = rec_loc;
+
+        Ok(rec_loc)
+    }
+
     /// Appends a record to the end of the file flushing the file to disk
     pub fn append_flush(&mut self, record: &[u8]) -> Result<u64, IOError> {
         let ret = self.append(record);
@@ -171,13 +183,9 @@ impl RecordFile {
         let rec_size = self.fd.read_u32_at::<LE>(file_offset)?;
         let mut rec_buff = vec![0; rec_size as usize];
 
-        self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
+        debug!("ATTEMPTING TO READ RECORD OF SIZE {} FROM {}", rec_size, file_offset);
 
-//        debug!(
-//            "READ RECORD FROM {}: {}",
-//            file_offset,
-//            rec_to_string(rec_size as u32, &rec_buff)
-//        );
+        self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
 
         Ok(rec_buff)
     }

@@ -63,6 +63,7 @@ fn delete(start: u64, end: u64, db: &mut KVS) {
 #[test]
 fn benchmarks() {
     sl::init_with_level(Level::Info).unwrap();
+//    sl::init_with_level(Level::Debug).unwrap();
 
     let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
     let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
