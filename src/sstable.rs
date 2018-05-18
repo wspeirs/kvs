@@ -1,8 +1,9 @@
-use rmps::encode::{to_vec, write};
+use rmps::encode::to_vec;
 use rmps::decode::from_slice;
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::cmp::Ordering::{Less, Equal, Greater};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{Error as IOError, ErrorKind};
 use std::iter::IntoIterator;
@@ -116,7 +117,7 @@ impl SSTable {
             }
 
             // append the record to the end of the file, without flushing
-            let loc = rec_file.append_with(|mut w| rec.serialize(&mut w))?;
+            let loc = rec_file.append_record(rec)?;
 
             // add to our group index
             group_indices[(sstable_info.record_count % group_count as u64) as usize] = loc;
@@ -157,7 +158,8 @@ impl SSTable {
 
         // append our info as the last record, and flush to disk
         let info_buff = to_vec(&sstable_info).expect("Error serializing SSTableInfo");
-        rec_file.append_flush(&info_buff)?;
+        rec_file.append(&info_buff).expect("Error writing SSTableInfo");
+        rec_file.flush();
 
         // create our SSTable
         let sstable = SSTable {
@@ -170,6 +172,28 @@ impl SSTable {
         Ok(sstable)
     }
 
+    fn binary_search_by<'a, T, F>(array: &'a [T], mut f: F) -> Result<usize, usize>
+        where F: FnMut(&'a T) -> Ordering
+    {
+        let mut base = 0usize;
+        let mut s = array;
+
+        loop {
+            let (head, tail) = s.split_at(s.len() >> 1);
+            if tail.is_empty() {
+                return Err(base);
+            }
+            match f(&tail[0]) {
+                Less => {
+                    base += head.len() + 1;
+                    s = &tail[1..];
+                }
+                Greater => s = head,
+                Equal => return Ok(base + head.len()),
+            }
+        }
+    }
+
     pub fn get(&self, key: Vec<u8>) -> Result<Option<Record>, IOError> {
         // check if the key is in the range of this SSTable
         if self.info.record_count == 0 || key < self.info.smallest_key || self.info.largest_key < key {
@@ -177,9 +201,8 @@ impl SSTable {
         }
 
         // binary search using the indices
-        let top_index_res = self.info.indices.binary_search_by(|index| {
+        let top_index_res = SSTable::binary_search_by(&self.info.indices, |index| {
             let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
-//            let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
             let rec = Record::deserialize(rec_buff);
 
             rec.key().cmp(&key)
@@ -204,9 +227,8 @@ impl SSTable {
         let mut rec :Record = Record::new(Vec::<u8>::new(), Some(Vec::<u8>::new()));
 
         // binary search through the group indices
-        let group_index_res = group_indices.binary_search_by(|index| {
+        let group_index_res = SSTable::binary_search_by(&group_indices, |index| {
             let rec_buff = self.rec_file.read_at(*index).expect("Error reading SSTable");
-//            rec = from_slice(&rec_buff).expect("Error deserializing Record");
             rec = Record::deserialize(rec_buff);
 
             rec.key().cmp(&key)
@@ -279,7 +301,6 @@ impl<'a> Iterator for Iter<'a> {
 
         let rec_buff = self.sstable.rec_file.read_at(self.cur_offset).expect("Error reading SSTable");
         let rec_buff_len = rec_buff.len();
-//        let rec :Record = from_slice(&rec_buff).expect("Error deserializing Record");
         let rec = Record::deserialize(rec_buff);
 
         self.cur_record += 1;

@@ -3,6 +3,9 @@ name = "kvs"
 version = "0.1.0"
 authors = ["William Speirs <bill.speirs@gmail.com>"]
 
+[profile.release]
+debug = true
+
 [dependencies]
 byteorder = "1.2"
 itertools = "0.7"

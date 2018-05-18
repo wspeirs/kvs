@@ -10,7 +10,7 @@ use record_file::buf2string;
 
 use kvs::get_timestamp;
 
-const VALUE_SENTINEL: u64 = 0xFF_FF_FF_FF_FF_FF_FF_FF;
+pub const VALUE_SENTINEL: u64 = 0xFF_FF_FF_FF_FF_FF_FF_FF;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Record {
@@ -100,6 +100,10 @@ impl Record {
         self.created
     }
 
+    pub fn ttl(&self) -> u64 {
+        self.ttl
+    }
+
     pub fn is_delete(&self) -> bool {
         self.value.is_none()
     }
@@ -182,7 +186,7 @@ mod tests {
         let buff = vec![0x00 as u8; rec.size() as usize + U32_SIZE];
         let mut cursor = Cursor::new(buff);
 
-        let ret = rec.serialize(&mut cursor).unwrap();
+        rec.serialize(&mut cursor).unwrap();
         let buff_d = cursor.into_inner();
 
         println!("{:?}", buff_d);

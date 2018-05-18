@@ -17,9 +17,9 @@ use record::Record;
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 
 // constants for now
-const MAX_MEM_COUNT: usize = 110_000;
-const GROUP_COUNT: u32 = 1_000;
-const MAX_FILE_COUNT: usize = 10;
+const MAX_MEM_COUNT: usize = 10_000;
+const GROUP_COUNT: u32 = 100;
+const MAX_FILE_COUNT: usize = 5;
 
 pub struct KVS {
     db_dir: PathBuf,
@@ -338,7 +338,7 @@ impl KVS {
     }
 
     fn insert(&mut self, record: Record) {
-        self.wal_file.append_with(|mut w| record.serialize(&mut w)).expect("Error writing to WAL file");
+        self.wal_file.append_record(&record).expect("Error writing to WAL file");
 
         // insert into the mem_table
         self.mem_table.insert(record.key(), record);

@@ -4,9 +4,10 @@ use positioned_io::{ReadAt, WriteAt, WriteBytesExt as PositionedWriteBytesExt, R
 use std::cell::RefCell;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::fs::{File, OpenOptions};
-use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::ops::Fn;
+use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write, BufWriter};
 use std::path::PathBuf;
+
+use record::{Record, VALUE_SENTINEL};
 
 use U32_SIZE;
 use U64_SIZE;
@@ -27,10 +28,13 @@ use U64_SIZE;
 /// |---------------------------|
 
 pub const BAD_COUNT: u32 = 0xFFFFFFFF;
+pub const BUFFER_SIZE: usize = 4096;
 
 /// Record file
 pub struct RecordFile {
     fd: File,           // actual file
+    writer: RefCell<BufWriter<File>>,  // buffered writer
+//    writer: File,  // buffered writer
     file_path: PathBuf, // location of the file on disk
     record_count: u32,  // number of records in the file
     header_len: usize,  // length of the header
@@ -113,8 +117,11 @@ impl RecordFile {
             );
         }
 
+        let writer = RefCell::new(BufWriter::with_capacity(BUFFER_SIZE, fd.try_clone().expect("Unable to create RecordFile writer")));
+
         Ok(RecordFile {
             fd,
+            writer,
             file_path: PathBuf::from(file_path),
             record_count,
             header_len: header.len(),
@@ -122,6 +129,7 @@ impl RecordFile {
         })
     }
 
+    /// Returns the number of records in this file
     pub fn record_count(&self) -> u32 {
         self.record_count
     }
@@ -137,13 +145,12 @@ impl RecordFile {
     /// Appends a record to the end of the file without flushing to disk
     /// Returns the location where the record was written
     pub fn append(&mut self, record: &[u8]) -> Result<u64, IOError> {
-        let rec_loc = self.fd.seek(SeekFrom::End(0))?;
+        let writer = self.writer.get_mut();
+        let rec_loc = writer.seek(SeekFrom::End(0))?;
         let rec_size = record.len();
 
-//        debug!("WROTE RECORD AT {}: {}", rec_loc, rec_to_string(rec_size as u32, record));
-
-        self.fd.write_u32::<LE>(rec_size as u32)?;
-        self.fd.write(record)?;
+        writer.write_u32::<LE>(rec_size as u32)?;
+        writer.write(record)?;
 
         self.record_count += 1;
         self.last_record = rec_loc;
@@ -151,10 +158,28 @@ impl RecordFile {
         Ok(rec_loc)
     }
 
-    pub fn append_with<F>(&mut self, func: F) -> Result<u64, IOError> where F: Fn(Box<Write>) -> Result<u32, IOError> {
-        let rec_loc = self.fd.seek(SeekFrom::End(0))?;
+    pub fn append_record(&mut self, rec: &Record) -> Result<u64, IOError> {
+        let writer = self.writer.get_mut();
+        let rec_loc = writer.seek(SeekFrom::End(0))?;
 
-        func(Box::new(self.fd.try_clone()?))?; // let the function write the data
+        writer.write_u32::<LE>(rec.size())?; // write out the total size of this serialization
+
+        // the serialization
+        writer.write_u64::<LE>(rec.key().len() as u64)?; // length of key
+
+        writer.write_all(&rec.key())?; // write the actual key's data
+
+        if !rec.is_delete() {
+            let value = rec.value().to_owned();
+
+            writer.write_u64::<LE>(value.len() as u64)?; // write the size of the value
+            writer.write_all(&value)?;
+        } else {
+            writer.write_u64::<LE>(VALUE_SENTINEL)?; // sentinel value for no value
+        }
+
+        writer.write_u64::<LE>(rec.created())?;
+        writer.write_u64::<LE>(rec.ttl())?;
 
         self.record_count += 1;
         self.last_record = rec_loc;
@@ -162,24 +187,17 @@ impl RecordFile {
         Ok(rec_loc)
     }
 
-    /// Appends a record to the end of the file flushing the file to disk
-    pub fn append_flush(&mut self, record: &[u8]) -> Result<u64, IOError> {
-        let ret = self.append(record);
-
-        self.flush()?;
-
-        ret
-    }
-
-    pub fn flush(&mut self) -> Result<(), IOError> {
-        self.fd.seek(SeekFrom::Start(self.header_len as u64)).unwrap();
-        self.fd.write_u32::<LE>(self.record_count).unwrap(); // cannot return an error, so best attempt
-        self.fd.write_u64::<LE>(self.last_record).unwrap(); // write out the end of the file
-        Write::flush(&mut self.fd)
+    pub fn flush(&mut self) {
+        let writer = self.writer.get_mut();
+        writer.seek(SeekFrom::Start(self.header_len as u64)).expect("Error seeking");
+        writer.write_u32::<LE>(self.record_count).expect("Error writing record count"); // cannot return an error, so best attempt
+        writer.write_u64::<LE>(self.last_record).expect("Error writing last record");  // write out the end of the file
+        writer.flush().expect("Error flushing to disk");
     }
 
     /// Read a record from a given offset
     pub fn read_at(&self, file_offset: u64) -> Result<Vec<u8>, IOError> {
+        self.writer.borrow_mut().flush()?; // need to flush any existing writes to disk
         let rec_size = self.fd.read_u32_at::<LE>(file_offset)?;
         let mut rec_buff = vec![0; rec_size as usize];
 
@@ -225,7 +243,7 @@ impl RecordFile {
 
 impl Drop for RecordFile {
     fn drop(&mut self) {
-        self.flush().unwrap();
+        self.flush();
 
         debug!("DROP: {:?}: records: {}; last record: {}", self.file_path, self.record_count, self.last_record);
     }
@@ -295,12 +313,9 @@ impl Iterator for RecordFileIterator {
     fn next(&mut self) -> Option<Self::Item> {
         // move to the start of the records if this is the first time through
         if self.cur_record == 0 {
+            self.record_file.get_mut().writer.borrow_mut().flush().expect("Failed to flush writer to disk");
             let offset = (self.record_file.borrow().header_len as usize + U32_SIZE + U64_SIZE) as u64;
-            self.record_file
-                .get_mut()
-                .fd
-                .seek(SeekFrom::Start(offset))
-                .unwrap();
+            self.record_file.get_mut().fd.seek(SeekFrom::Start(offset)).unwrap();
         }
 
         // invariant when we've reached the end of the records
