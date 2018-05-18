@@ -2,5 +2,5 @@
 /target
 **/*.rs.bk
 Cargo.lock
-benches/*.o
-benches/benchmarks
+**/*.o
+benches/external/benchmarks
