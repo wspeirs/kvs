@@ -1,4 +1,5 @@
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use lru_cache::LruCache;
 use positioned_io::{ReadAt, WriteAt, WriteBytesExt as PositionedWriteBytesExt, ReadBytesExt as PositionedReadBytesExt};
 
 use std::cell::RefCell;
@@ -28,17 +29,19 @@ use U64_SIZE;
 /// |---------------------------|
 
 pub const BAD_COUNT: u32 = 0xFFFFFFFF;
+
 pub const BUFFER_SIZE: usize = 4096;
+pub const CACHE_SIZE: usize = 100_000;
 
 /// Record file
 pub struct RecordFile {
     fd: File,           // actual file
     writer: RefCell<BufWriter<File>>,  // buffered writer
-//    writer: File,  // buffered writer
     file_path: PathBuf, // location of the file on disk
     record_count: u32,  // number of records in the file
     header_len: usize,  // length of the header
     last_record: u64,   // the start of the last record
+    record_cache: RefCell<LruCache<u64, Vec<u8>>>
 }
 
 pub fn buf2string(buf: &[u8]) -> String {
@@ -126,6 +129,7 @@ impl RecordFile {
             record_count,
             header_len: header.len(),
             last_record,
+            record_cache: RefCell::new(LruCache::new(CACHE_SIZE))
         })
     }
 
@@ -154,6 +158,9 @@ impl RecordFile {
 
         self.record_count += 1;
         self.last_record = rec_loc;
+
+        // add to our cache
+        self.record_cache.get_mut().insert(rec_loc, record.to_owned());
 
         Ok(rec_loc)
     }
@@ -197,6 +204,10 @@ impl RecordFile {
 
     /// Read a record from a given offset
     pub fn read_at(&self, file_offset: u64) -> Result<Vec<u8>, IOError> {
+        if let Some(ret) = self.record_cache.borrow_mut().get_mut(&file_offset) {
+            return Ok(ret.to_vec());
+        }
+
         self.writer.borrow_mut().flush()?; // need to flush any existing writes to disk
         let rec_size = self.fd.read_u32_at::<LE>(file_offset)?;
         let mut rec_buff = vec![0; rec_size as usize];
@@ -204,6 +215,9 @@ impl RecordFile {
         debug!("ATTEMPTING TO READ RECORD OF SIZE {} FROM {}", rec_size, file_offset);
 
         self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
+
+        // add to our cache
+        self.record_cache.borrow_mut().insert(file_offset, rec_buff.to_owned());
 
         Ok(rec_buff)
     }
@@ -219,7 +233,8 @@ impl RecordFile {
         self.fd.write_u32_at::<LE>(file_offset, record.len() as u32)?;
         self.fd.write_all_at(file_offset + U32_SIZE as u64, &record)?;
 
-//        debug!("WROTE RECORD AT {}: {}", file_offset, rec_to_string(record.len() as u32, record));
+        // add to our cache
+        self.record_cache.get_mut().insert(file_offset, record.to_owned());
 
         Ok( () )
     }

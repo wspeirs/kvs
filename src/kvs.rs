@@ -19,7 +19,7 @@ const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 // constants for now
 const MAX_MEM_COUNT: usize = 10_000;
 const GROUP_COUNT: u32 = 100;
-const MAX_FILE_COUNT: usize = 5;
+const MAX_FILE_COUNT: usize = 2;
 
 pub struct KVS {
     db_dir: PathBuf,

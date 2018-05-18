@@ -48,7 +48,7 @@ fn get(start: u64, end: u64, db: &KVS) -> u64 {
         for i in range {
             let key = format!("KEY_{}", i).as_bytes().to_vec();
 
-            let value = db.get(&key).expect(&format!("KEY {:?} NOT FOUND", key));
+            let value = db.get(&key).expect(&format!("KEY_{} ({:?}) NOT FOUND", i, key));
         }
     });
 
