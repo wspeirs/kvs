@@ -34,6 +34,13 @@ pub struct KVSOptions {
 }
 
 impl KVSOptions {
+    /// Creates a new `KVSOptions` struct with the only required parameter
+    ///
+    /// See each of the methods of associated defaults.
+    /// # Examples
+    /// ```
+    /// let kvs = KVSOptions::new("/tmp/kvs").create().unwrap();
+    /// ```
     pub fn new(db_dir: &PathBuf) -> KVSOptions {
         KVSOptions { max_mem_count: DEFAULT_MEM_COUNT,
             group_count: DEFAULT_GROUP_COUNT,
@@ -48,7 +55,7 @@ impl KVSOptions {
     ///
     /// Generally you want this size to be as large as possible without taking up too much memory.
     /// It all depends upon the size the keys and values. The memory used per entry is:
-    /// size_of(key) * 2 + size_of(value)
+    /// `size_of(key) * 2 + size_of(value)`
     ///
     /// Default: 100,000
     pub fn mem_count(&mut self, count: usize) -> &mut KVSOptions {
@@ -57,7 +64,7 @@ impl KVSOptions {
 
     /// Sets the number of records that are grouped together in the data files.
     ///
-    /// The number of u64 records kept in memory per data file equals: num_records / group_count
+    /// The number of `u64` records kept in memory per data file equals: `num_records / group_count`
     ///
     /// Default: 10,000
     pub fn group_count(&mut self, count: u32) -> &mut KVSOptions {
@@ -94,10 +101,16 @@ impl KVSOptions {
         self.rec_file_cache_size = count; self
     }
 
-    /// Creates a KVS instances from the given options.
+    /// Creates a `KVS` instance using the configured options.
     ///
-    /// This should only be called when creating a *new* KVS, not opening an existing one.
-    /// #panics
+    /// **This should only be called when creating a new `KVS` instance, not opening an existing one.**
+    /// To open an existing KVS directory/database, use the `KVS::open` function.
+    ///
+    /// # Examples
+    /// ```
+    /// let kvs = KVSOptions::new("/tmp/kvs").create().unwrap();
+    /// ```
+    /// # Panics
     /// If any of the options are nonsensical.
     pub fn create(self) -> Result<KVS, IOError> {
         if self.max_mem_count < 2 { panic!("mem_count must be greater than 1: {}", self.max_mem_count); }
@@ -137,7 +150,7 @@ fn coalesce_records(prev: Record, curr: Record) -> Result<Record, (Record, Recor
     }
 }
 
-/**
+/*
  * Files have the following meanings:
  * data.wal       - Write Ahead Log; journal of all put & deletes that are in mem_table
  * table.current  - SSTable with the merges from mem_table
@@ -206,6 +219,22 @@ impl KVS {
             cur_sstable: sstable_current,
             sstables: sstables,
         })
+    }
+
+    /// Opens an existing KVS directory/database.
+    ///
+    /// All of the original options used to create the KVS instance will be used when open.
+    ///
+    /// # Examples
+    /// ```
+    /// {   // scope so it is dropped after opening
+    ///     KVSOptions::new("/tmp/kvs").create().unwrap();
+    /// }
+    ///
+    /// let kvs = KVS::open("/tmp/kvs").unwrap();
+    /// ```
+    pub fn open(db_dir: &PathBuf) -> Result<KVS, IOError> {
+
     }
 
     /// Returns the path to the WAL file (or new one)

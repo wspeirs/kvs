@@ -1,3 +1,6 @@
+//! KVS is an implementation of a Log-Structed Merge-Tree.
+//! It provides a persistent key/value store.
+
 #[macro_use]
 extern crate log;
 
