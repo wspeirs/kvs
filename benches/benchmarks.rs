@@ -76,7 +76,7 @@ fn delete(start: u64, end: u64, db: &mut KVS) -> u64 {
 
 #[bench]
 fn full(bencher: &mut Bencher) {
-//    sl::init_with_level(Level::Info).unwrap();
+    sl::init_with_level(Level::Info).unwrap();
 //    sl::init_with_level(Level::Debug).unwrap();
 
     let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -101,20 +101,20 @@ fn full(bencher: &mut Bencher) {
     //   Put (update) 50M key/value: KEY_X & X_VALUE
     //   Get 50M keys in order
     //   Get 50M keys in reverse order
-//    put(0, num, &mut kvs, false);
+    put(0, num, &mut kvs, false);
 
-//    get(0, num, &kvs);
-//    get(num, 0, &kvs);
-//
-//    delete(0, num/2, &mut kvs);
-//
-//    get(num/2, num, &kvs);
-//    get(num, num/2, &kvs);
-//
-//    put(num/2, num, &mut kvs, true);
-//
-//    get(num/2, num, &kvs);
-//    get(num, num/2, &kvs);
+    get(0, num, &kvs);
+    get(num, 0, &kvs);
+
+    delete(0, num/2, &mut kvs);
+
+    get(num/2, num, &kvs);
+    get(num, num/2, &kvs);
+
+    put(num/2, num, &mut kvs, true);
+
+    get(num/2, num, &kvs);
+    get(num, num/2, &kvs);
 }
 
 #[bench]

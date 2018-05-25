@@ -30,8 +30,6 @@ use U64_SIZE;
 
 pub const BAD_COUNT: u32 = 0xFFFFFFFF;
 
-pub const BUFFER_SIZE: usize = 4096;
-pub const CACHE_SIZE: usize = 100_000;
 
 /// Record file
 pub struct RecordFile {
@@ -64,7 +62,7 @@ fn rec_to_string(size: u32, rec: &[u8]) -> String {
 }
 
 impl RecordFile {
-    pub fn new(file_path: &PathBuf, header: &[u8]) -> Result<RecordFile, IOError> {
+    pub fn new(file_path: &PathBuf, header: &[u8], buffer_size: usize, cache_size: usize) -> Result<RecordFile, IOError> {
         debug!("Attempting to open file: {}", file_path.display());
 
         let mut fd = OpenOptions::new()
@@ -120,7 +118,7 @@ impl RecordFile {
             );
         }
 
-        let writer = RefCell::new(BufWriter::with_capacity(BUFFER_SIZE, fd.try_clone().expect("Unable to create RecordFile writer")));
+        let writer = RefCell::new(BufWriter::with_capacity(buffer_size, fd.try_clone().expect("Unable to create RecordFile writer")));
 
         Ok(RecordFile {
             fd,
@@ -129,7 +127,7 @@ impl RecordFile {
             record_count,
             header_len: header.len(),
             last_record,
-            record_cache: RefCell::new(LruCache::new(CACHE_SIZE))
+            record_cache: RefCell::new(LruCache::new(cache_size))
         })
     }
 
@@ -428,6 +426,9 @@ mod tests {
     use rand::{thread_rng, Rng};
     use ::LOGGER_INIT;
 
+    const BUFFER_SIZE: usize = 4069;
+    const CACHE_SIZE: usize = 100;
+
     fn gen_file() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
@@ -443,7 +444,7 @@ mod tests {
     fn new() {
         let file = gen_file();
 
-        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes(), BUFFER_SIZE, CACHE_SIZE).unwrap();
 
         rec_file.fd.seek(SeekFrom::End(0)).unwrap();
         rec_file.fd.write("TEST".as_bytes()).unwrap();
@@ -454,20 +455,20 @@ mod tests {
         let file = gen_file();
 
         {
-            let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+            let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes(), BUFFER_SIZE, CACHE_SIZE).unwrap();
 
             rec_file.fd.seek(SeekFrom::End(0)).unwrap();
             rec_file.fd.write("TEST".as_bytes()).unwrap();
         }
 
-        RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+        RecordFile::new(&file, "ABCD".as_bytes(), BUFFER_SIZE, CACHE_SIZE).unwrap();
     }
 
     #[test]
     fn append() {
         let file = gen_file();
 
-        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes(), BUFFER_SIZE, CACHE_SIZE).unwrap();
 
         // put this here to see if it messes with stuff
         rec_file.fd.seek(SeekFrom::End(0)).unwrap();
@@ -486,7 +487,7 @@ mod tests {
     fn read_at() {
         let file = gen_file();
 
-        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes(), BUFFER_SIZE, CACHE_SIZE).unwrap();
         let rec = "THE_RECORD".as_bytes();
 
         rec_file.append(rec).unwrap();
@@ -501,7 +502,7 @@ mod tests {
     fn iterate() {
         let file = gen_file();
 
-        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes()).unwrap();
+        let mut rec_file = RecordFile::new(&file, "ABCD".as_bytes(), BUFFER_SIZE, CACHE_SIZE).unwrap();
 
         let rec = "THE_RECORD".as_bytes();
 

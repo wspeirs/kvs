@@ -37,12 +37,12 @@ pub struct SSTable {
 }
 
 impl SSTable {
-    pub fn open(file_path: &PathBuf) -> Result<SSTable, IOError> {
+    pub fn open(file_path: &PathBuf, buffer_size: usize, cache_size: usize) -> Result<SSTable, IOError> {
         if !file_path.exists() {
             return Err(IOError::new(ErrorKind::NotFound, format!("The SSTable {:?} was not found", file_path)));
         }
 
-        let rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
+        let rec_file = RecordFile::new(file_path, SSTABLE_HEADER, buffer_size, cache_size)?;
 
         let info = from_slice(&rec_file.last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo");
 
@@ -58,7 +58,7 @@ impl SSTable {
     /// * records - an iterator to records that will be inserted into this `SSTable`
     /// * group_count - the number of records to group together for each recorded index
     /// * count - the number of records to pull from the iterator and put into the `SSTable`
-    pub fn new<I, B>(file_path: &PathBuf,  records: &mut I, group_count: u32, count: Option<u64>) -> Result<SSTable, IOError>
+    pub fn new<I, B>(file_path: &PathBuf,  records: &mut I, group_count: u32, count: Option<u64>, buffer_size: usize, cache_size: usize) -> Result<SSTable, IOError>
         where I: Iterator<Item=B>, B: Borrow<Record>
     {
         debug!("New SSTable: {:?} group_count: {} count: {:?}", file_path, group_count, count);
@@ -71,7 +71,7 @@ impl SSTable {
         }
 
         // create the RecordFile that holds all the data for the SSTable
-        let mut rec_file = RecordFile::new(file_path, SSTABLE_HEADER)?;
+        let mut rec_file = RecordFile::new(file_path, SSTABLE_HEADER, buffer_size, cache_size)?;
 
         debug!("Created RecordFile: {:?}", rec_file);
 
@@ -355,6 +355,10 @@ mod tests {
     use serde_utils::serialize_u64_exact;
     use ::LOGGER_INIT;
 
+    const BUFFER_SIZE: usize = 4069;
+    const CACHE_SIZE: usize = 100;
+
+
     fn gen_dir() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
@@ -379,17 +383,17 @@ mod tests {
         }
 
         {
-            SSTable::new(&db_dir.join("test.data"), &mut records.iter(), group_size, if use_size { Some(num_records as u64) } else { None }).unwrap();
+            SSTable::new(&db_dir.join("test.data"), &mut records.iter(), group_size, if use_size { Some(num_records as u64) } else { None }, BUFFER_SIZE, CACHE_SIZE).unwrap();
         }
 
-        SSTable::open(&db_dir.join("test.data")).unwrap()
+        SSTable::open(&db_dir.join("test.data"), BUFFER_SIZE, CACHE_SIZE).unwrap()
     }
 
     #[test]
     fn test_new_empty() {
         let db_dir = gen_dir();
 
-        SSTable::new(&db_dir.join("test.data"), &mut iter::empty::<Record>(), 10, None).unwrap();
+        SSTable::new(&db_dir.join("test.data"), &mut iter::empty::<Record>(), 10, None, BUFFER_SIZE, CACHE_SIZE).unwrap();
     }
 
     #[test]

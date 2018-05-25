@@ -17,12 +17,101 @@ use record::Record;
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 
 // constants for now
-const MAX_MEM_COUNT: usize = 10_000;
-const GROUP_COUNT: u32 = 100;
-const MAX_FILE_COUNT: usize = 2;
+const DEFAULT_MEM_COUNT: usize = 100_000;
+const DEFAULT_GROUP_COUNT: u32 = 10_000;
+const DEFAULT_FILE_COUNT: usize = 6;
+const DEFAULT_BUFFER_SIZE: usize = 4096;
+const DEFAULT_CACHE_SIZE: usize = 100_000;
+
+#[derive(Debug, Clone)]
+pub struct KVSOptions {
+    max_mem_count: usize,
+    group_count: u32,
+    file_count: usize,
+    rec_file_buffer_size: usize,
+    rec_file_cache_size: usize,
+    db_dir: PathBuf
+}
+
+impl KVSOptions {
+    pub fn new(db_dir: &PathBuf) -> KVSOptions {
+        KVSOptions { max_mem_count: DEFAULT_MEM_COUNT,
+            group_count: DEFAULT_GROUP_COUNT,
+            file_count: DEFAULT_FILE_COUNT,
+            rec_file_buffer_size: DEFAULT_BUFFER_SIZE,
+            rec_file_cache_size: DEFAULT_CACHE_SIZE,
+            db_dir: db_dir.to_path_buf()
+        }
+    }
+
+    /// Sets the max number of items that will be kept in memory before persisting to disk.
+    ///
+    /// Generally you want this size to be as large as possible without taking up too much memory.
+    /// It all depends upon the size the keys and values. The memory used per entry is:
+    /// size_of(key) * 2 + size_of(value)
+    ///
+    /// Default: 100,000
+    pub fn mem_count(&mut self, count: usize) -> &mut KVSOptions {
+        self.max_mem_count = count; self
+    }
+
+    /// Sets the number of records that are grouped together in the data files.
+    ///
+    /// The number of u64 records kept in memory per data file equals: num_records / group_count
+    ///
+    /// Default: 10,000
+    pub fn group_count(&mut self, count: u32) -> &mut KVSOptions {
+        self.group_count = count; self
+    }
+
+    /// The number of files to keep in the database directory.
+    ///
+    /// More files means faster searches, but slower writes.
+    /// Fewer files mean faster writes, but slower reads.
+    ///
+    /// Default: 6
+    pub fn file_count(&mut self, count: usize) -> &mut KVSOptions {
+        self.file_count = count; self
+    }
+
+    /// The size of the buffer used for writing.
+    ///
+    /// It's best to keep this size a multiple of a page (4096 on most systems)
+    ///
+    /// Default: 4096
+    pub fn file_buffer(&mut self, size: usize) -> &mut KVSOptions {
+        self.rec_file_buffer_size = size; self
+    }
+
+    /// The size of the record cache.
+    ///
+    /// Key/value pairs, and other internal records are kepts in an in-memory cache. This sets
+    /// the number of items kept in the cache. The memory usage will be approximately:
+    /// size_of(key) + size_of(value) + 16 * this value
+    ///
+    /// Default: 100,000
+    pub fn cache_size(&mut self, count: usize) -> &mut KVSOptions {
+        self.rec_file_cache_size = count; self
+    }
+
+    /// Creates a KVS instances from the given options.
+    ///
+    /// This should only be called when creating a *new* KVS, not opening an existing one.
+    /// #panics
+    /// If any of the options are nonsensical.
+    pub fn create(self) -> Result<KVS, IOError> {
+        if self.max_mem_count < 2 { panic!("mem_count must be greater than 1: {}", self.max_mem_count); }
+        if self.group_count < 100 { panic!("group_count is too small, make > 100: {}", self.group_count); }
+        if self.file_count < 2 { panic!("file_count is too small, try > 2: {}", self.file_count); }
+        if self.rec_file_buffer_size < 4096 { panic!("file_buffer is too small, try > 4096: {}", self.rec_file_buffer_size); }
+        if self.rec_file_cache_size < 1 { panic!("cache_size must be greater than 1: {}", self.rec_file_cache_size); }
+
+        KVS::new(self)
+    }
+}
 
 pub struct KVS {
-    db_dir: PathBuf,
+    options: KVSOptions,
     cur_sstable_num: u64,
     wal_file: RecordFile,
     mem_table: BTreeMap<Vec<u8>, Record>,
@@ -57,10 +146,11 @@ fn coalesce_records(prev: Record, curr: Record) -> Result<Record, (Record, Recor
  */
 impl KVS {
     /// Creates a new KVS given a directory to store the files
-    pub fn new(db_dir: &PathBuf) -> Result<KVS, IOError> {
+    fn new(options: KVSOptions) -> Result<KVS, IOError> {
+        let db_dir = options.db_dir.to_path_buf();
         let mut mem_table = BTreeMap::new();
 
-        let wal_file = RecordFile::new(&db_dir.join("data.wal"), WAL_HEADER)?;
+        let wal_file = RecordFile::new(&db_dir.join("data.wal"), WAL_HEADER, options.rec_file_buffer_size, options.rec_file_cache_size)?;
 
         // read back in our WAL file if we have one
         if wal_file.record_count() > 0 {
@@ -73,9 +163,9 @@ impl KVS {
         let sstable_current_path = db_dir.join("table.current");
 
         let sstable_current = if sstable_current_path.exists() {
-            SSTable::open(&sstable_current_path)
+            SSTable::open(&sstable_current_path, options.rec_file_buffer_size, options.rec_file_cache_size)
         } else {
-            SSTable::new(&sstable_current_path, &mut iter::empty::<Record>(), GROUP_COUNT, None)
+            SSTable::new(&sstable_current_path, &mut iter::empty::<Record>(), options.group_count, None, options.rec_file_buffer_size, options.rec_file_cache_size)
         }.expect("Error opening current SSTable");
 
         let mut sstables = BTreeSet::<SSTable>::new();
@@ -84,7 +174,7 @@ impl KVS {
         let mut max_sstable_num : u64 = 0;
 
         // gather up all the SSTables in this directory
-        for entry in fs::read_dir(db_dir)? {
+        for entry in fs::read_dir(db_dir.to_path_buf())? {
             let entry = entry.expect("Error reading directory entry");
             let path = entry.path();
 
@@ -97,7 +187,7 @@ impl KVS {
 
             if let Some(capture) = captures {
                 // add to our set of tables
-                sstables.insert(SSTable::open(&path)?);
+                sstables.insert(SSTable::open(&path, options.rec_file_buffer_size, options.rec_file_cache_size)?);
 
                 // get the number of the table
                 let sstable_num = capture.get(1).expect("Error capturing SSTable number").as_str().parse::<u64>().expect("Error parsing number");
@@ -109,7 +199,7 @@ impl KVS {
         }
 
         return Ok(KVS {
-            db_dir: PathBuf::from(db_dir),
+            options: options,
             cur_sstable_num: max_sstable_num + 1,
             wal_file: wal_file,
             mem_table: mem_table,
@@ -121,31 +211,31 @@ impl KVS {
     /// Returns the path to the WAL file (or new one)
     fn wal_file_path(&self, new: bool) -> PathBuf {
         if new {
-            self.db_dir.join("data.wal-new")
+            self.options.db_dir.join("data.wal-new")
         } else {
-            self.db_dir.join("data.wal")
+            self.options.db_dir.join("data.wal")
         }
     }
 
     /// Returns the path to the current SSTable (or new one)
     fn cur_sstable_path(&self, new: bool) -> PathBuf {
         if new {
-            self.db_dir.join("table.current-new")
+            self.options.db_dir.join("table.current-new")
         } else {
-            self.db_dir.join("table.current")
+            self.options.db_dir.join("table.current")
         }
     }
 
     /// Generates the path to the current SSTable
     fn sstable_path(&self) -> PathBuf {
-        self.db_dir.join(format!("table-{}.data", self.cur_sstable_num))
+        self.options.db_dir.join(format!("table-{}.data", self.cur_sstable_num))
     }
 
     /// Creates a new WAL file, deletes current WAL file, and renames the new to current
     fn update_wal_file(&mut self) {
         {
             // create a new WAL file
-            RecordFile::new(&self.wal_file_path(true), WAL_HEADER).expect(&format!("Error creating WAL file: {:?}", self.wal_file_path(true)));
+            RecordFile::new(&self.wal_file_path(true), WAL_HEADER, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error creating WAL file: {:?}", self.wal_file_path(true)));
         }
 
         // remove the old one
@@ -154,7 +244,7 @@ impl KVS {
         // rename the new to old
         fs::rename(self.wal_file_path(true), &self.wal_file_path(false)).expect(&format!("Error renaming WAL file: {:?} -> {:?}", self.wal_file_path(true), self.wal_file_path(false)));
 
-        self.wal_file = RecordFile::new(&self.wal_file_path(false), WAL_HEADER).expect(&format!("Error opening WAL file: {:?}", self.wal_file_path(false)));
+        self.wal_file = RecordFile::new(&self.wal_file_path(false), WAL_HEADER, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error opening WAL file: {:?}", self.wal_file_path(false)));
     }
 
     /// flush the mem_table to disk
@@ -162,8 +252,8 @@ impl KVS {
     fn flush(&mut self, check_size: bool) -> bool {
         debug!("Starting a flush");
 
-        if check_size && self.mem_table.len() < MAX_MEM_COUNT {
-            debug!("Too few records in mem_table: {} < {}", self.mem_table.len(), MAX_MEM_COUNT);
+        if check_size && self.mem_table.len() < self.options.max_mem_count {
+            debug!("Too few records in mem_table: {} < {}", self.mem_table.len(), self.options.max_mem_count);
             return false; // don't need to do anything yet
         }
 
@@ -177,7 +267,7 @@ impl KVS {
 
             {
                 // create and close the new SSTable
-                SSTable::new(&self.cur_sstable_path(true), &mut it, GROUP_COUNT as u32, None).expect(&format!("Error creating SSTable: {:?}", &self.cur_sstable_path(true)));
+                SSTable::new(&self.cur_sstable_path(true), &mut it, self.options.group_count as u32, None, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error creating SSTable: {:?}", &self.cur_sstable_path(true)));
             }
 
             // remove the old one if it exists
@@ -190,7 +280,7 @@ impl KVS {
             // rename the new to old
             fs::rename(&self.cur_sstable_path(true), &self.cur_sstable_path(false)).expect(&format!("Error renaming current SSTable: {:?} -> {:?}", self.cur_sstable_path(true), self.cur_sstable_path(false)));
 
-            SSTable::open(&self.cur_sstable_path(false)).expect(&format!("Error opening current SSTable: {:?}", self.cur_sstable_path(false)))
+            SSTable::open(&self.cur_sstable_path(false), self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error opening current SSTable: {:?}", self.cur_sstable_path(false)))
         };
 
         // remove everything in the mem_table
@@ -209,9 +299,9 @@ impl KVS {
     fn compact(&mut self) -> bool {
         debug!("Starting a compaction");
 
-        // we wait until we have enough records for every file to get MAX_MEM_COUNT
-        if self.mem_table.len() as u64 + self.cur_sstable.record_count() < (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64 {
-            debug!("Not enough records for compact: {} < {}", self.mem_table.len() as u64 + self.cur_sstable.record_count(), (MAX_MEM_COUNT * MAX_FILE_COUNT) as u64);
+        // we wait until we have enough records for every file to get self.options.max_mem_count
+        if self.mem_table.len() as u64 + self.cur_sstable.record_count() < (self.options.max_mem_count * self.options.file_count) as u64 {
+            debug!("Not enough records for compact: {} < {}", self.mem_table.len() as u64 + self.cur_sstable.record_count(), (self.options.max_mem_count * self.options.file_count) as u64);
             return false;
         }
 
@@ -222,7 +312,7 @@ impl KVS {
         self.sstables = {
             let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
             let ss_cur_it: Box<Iterator<Item=Record>> = Box::new(self.cur_sstable.iter());
-            let mut ss_its = Vec::with_capacity(MAX_FILE_COUNT + 2);
+            let mut ss_its = Vec::with_capacity(self.options.file_count + 2);
             let mut record_count = self.mem_table.len() as u64 + self.cur_sstable.record_count();
 
             ss_its.push(mem_it);
@@ -240,21 +330,21 @@ impl KVS {
                     !rec.is_delete() && !rec.is_expired(cur_time) // remove all deleted and expired
                 });
 
-            let records_per_file = record_count / MAX_FILE_COUNT as u64;
+            let records_per_file = record_count / self.options.file_count as u64;
 
-            debug!("RECORDS PER FILE: {} = {} / {}", records_per_file, record_count, MAX_FILE_COUNT as u64);
+            debug!("RECORDS PER FILE: {} = {} / {}", records_per_file, record_count, self.options.file_count as u64);
 
             let mut new_sstables = BTreeSet::<SSTable>::new();
 
             // create all the tables but the last one
-            for _i in 0..MAX_FILE_COUNT-1 {
-                let sstable = SSTable::new(&self.sstable_path(), &mut it, GROUP_COUNT as u32, Some(records_per_file)).expect(&format!("Error creating SSTable: {:?}", self.sstable_path()));
+            for _i in 0..self.options.file_count-1 {
+                let sstable = SSTable::new(&self.sstable_path(), &mut it, self.options.group_count as u32, Some(records_per_file), self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error creating SSTable: {:?}", self.sstable_path()));
                 self.cur_sstable_num += 1;
                 new_sstables.insert(sstable);
             }
 
             // the last one gets all the rest of the records
-            let sstable = SSTable::new(&self.sstable_path(), &mut it, GROUP_COUNT as u32, None).expect(&format!("Error creating SSTable: {:?}", self.sstable_path()));
+            let sstable = SSTable::new(&self.sstable_path(), &mut it, self.options.group_count as u32, None, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error creating SSTable: {:?}", self.sstable_path()));
             self.cur_sstable_num += 1;
             new_sstables.insert(sstable);
 
@@ -270,7 +360,7 @@ impl KVS {
         fs::remove_file(self.cur_sstable_path(false)).expect(&format!("Error removing current SSTable: {:?}", self.cur_sstable_path(false)));
 
         // create a new empty current SSTable
-        self.cur_sstable = SSTable::new(&self.cur_sstable_path(false), &mut iter::empty::<Record>(), GROUP_COUNT, None).expect(&format!("Error creating blank current SSTable: {:?}", self.cur_sstable_path(false)));
+        self.cur_sstable = SSTable::new(&self.cur_sstable_path(false), &mut iter::empty::<Record>(), self.options.group_count, None, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error creating blank current SSTable: {:?}", self.cur_sstable_path(false)));
 
         // remove everything from the mem_table
         self.mem_table.clear();
@@ -344,7 +434,7 @@ impl KVS {
         self.mem_table.insert(record.key(), record);
 
         // check to see if we need to flush to disk
-        if self.mem_table.len() >= MAX_MEM_COUNT {
+        if self.mem_table.len() >= self.options.max_mem_count {
             // compact won't do anything if it's not needed
             if !self.compact() {
                 // see if we need to flush, if a compaction didn't occur
@@ -405,14 +495,15 @@ impl Drop for KVS {
 
 #[cfg(test)]
 mod tests {
-    use kvs::KVS;
-    use kvs::MAX_MEM_COUNT;
-    use kvs::MAX_FILE_COUNT;
+    use kvs::{KVSOptions, KVS};
     use std::path::PathBuf;
     use rand::{thread_rng, Rng};
     use std::fs::create_dir;
     use simple_logger;
     use ::LOGGER_INIT;
+
+    const MAX_MEM_COUNT: usize = 100;
+    const MAX_FILE_COUNT: usize = 6;
 
     fn gen_dir() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
@@ -430,13 +521,13 @@ mod tests {
     #[test]
     fn new() {
         let db_dir = gen_dir();
-        let _kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+        let _kvs = KVSOptions::new(&PathBuf::from(db_dir)).create().unwrap();
     }
 
     #[test]
     fn put_flush_get() {
         let db_dir = gen_dir();
-        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+        let mut kvs = KVSOptions::new(&PathBuf::from(db_dir)).create().unwrap();
 
         let key = "KEY".as_bytes();
         let value = "VALUE".as_bytes();
@@ -457,7 +548,7 @@ mod tests {
     #[test]
     fn auto_flush() {
         let db_dir = gen_dir();
-        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+        let mut kvs = KVSOptions::new(&PathBuf::from(db_dir)).create().unwrap();
 
         for _i in 0..MAX_MEM_COUNT+1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -473,7 +564,7 @@ mod tests {
     #[test]
     fn compact() {
         let db_dir = gen_dir();
-        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+        let mut kvs = KVSOptions::new(&PathBuf::from(db_dir)).create().unwrap();
 
         for _i in 0..MAX_MEM_COUNT*MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -495,7 +586,7 @@ mod tests {
         let db_dir = gen_dir();
 
         {
-            let mut kvs = KVS::new(&db_dir).unwrap();
+            let mut kvs = KVSOptions::new(&db_dir).create().unwrap();
 
             for _i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
                 let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -512,7 +603,7 @@ mod tests {
             assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
         }
 
-        let mut kvs = KVS::new(&db_dir).unwrap();
+        let mut kvs = KVSOptions::new(&db_dir).create().unwrap();
 
         for _i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -532,7 +623,7 @@ mod tests {
     #[test]
     fn delete() {
         let db_dir = gen_dir();
-        let mut kvs = KVS::new(&PathBuf::from(db_dir)).unwrap();
+        let mut kvs = KVSOptions::new(&PathBuf::from(db_dir)).create().unwrap();
 
         let key = "KEY".as_bytes();
         let value = "VALUE".as_bytes();
@@ -561,7 +652,7 @@ mod tests {
         let db_dir = gen_dir();
 
         {
-            let mut kvs = KVS::new(&db_dir).unwrap();
+            let mut kvs = KVSOptions::new(&db_dir).create().unwrap();
 
             // fill half the mem_table, so we're sure we don't flush
             for i in 0..MAX_MEM_COUNT / 2 {
@@ -574,7 +665,7 @@ mod tests {
         }
 
         {
-            let kvs = KVS::new(&db_dir).unwrap();
+            let kvs = KVSOptions::new(&db_dir).create().unwrap();
 
             for i in 0..MAX_MEM_COUNT / 2 {
                 let key = format!("KEY_{}", i).as_bytes().to_vec();
@@ -584,7 +675,7 @@ mod tests {
         }
 
         {
-            let kvs = KVS::new(&db_dir).unwrap();
+            let kvs = KVSOptions::new(&db_dir).create().unwrap();
 
             for i in 0..MAX_MEM_COUNT / 2 {
                 let key = format!("KEY_{}", i).as_bytes().to_vec();
@@ -598,7 +689,7 @@ mod tests {
     fn put_compact_get() {
         let db_dir = gen_dir();
 
-        let mut kvs = KVS::new(&db_dir).unwrap();
+        let mut kvs = KVSOptions::new(&db_dir).create().unwrap();
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -621,7 +712,7 @@ mod tests {
     fn put_compact_update_get() {
         let db_dir = gen_dir();
 
-        let mut kvs = KVS::new(&db_dir).unwrap();
+        let mut kvs = KVSOptions::new(&db_dir).create().unwrap();
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
@@ -654,7 +745,7 @@ mod tests {
     fn put_compact_delete_get() {
         let db_dir = gen_dir();
 
-        let mut kvs = KVS::new(&db_dir).unwrap();
+        let mut kvs = KVSOptions::new(&db_dir).create().unwrap();
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();

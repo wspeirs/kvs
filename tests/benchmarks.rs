@@ -1,5 +1,5 @@
 extern crate kvs;
-use kvs::KVS;
+use kvs::{KVSOptions, KVS};
 
 extern crate elapsed;
 extern crate rand;
@@ -72,7 +72,7 @@ fn benchmarks() {
 
     create_dir(&ret_dir).unwrap();
 
-    let mut kvs = KVS::new(&PathBuf::from(ret_dir)).expect("Error creating KVS");
+    let mut kvs = KVSOptions::new(&PathBuf::from(ret_dir)).create().expect("Error creating KVS");
 
     let num: u64 = 1_000;
 
