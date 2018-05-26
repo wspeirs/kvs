@@ -3,7 +3,9 @@ use std::fs;
 use std::io::{Error as IOError};
 use std::iter;
 use std::path::PathBuf;
+use std::thread::yield_now;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use itertools::kmerge;
 use itertools::Itertools;
@@ -123,13 +125,25 @@ impl KVSOptions {
     }
 }
 
-pub struct KVS {
-    options: KVSOptions,
-    cur_sstable_num: u64,
+// Contains all the data for the KVS instance
+struct Data {
     wal_file: RecordFile,
     mem_table: BTreeMap<Vec<u8>, Record>,
     cur_sstable: SSTable,
     sstables: BTreeSet<SSTable>,
+}
+
+/*
+ * We only handle the "current" and "new". When a compaction needs to occur, we have enough room
+ * for another set of mem_table & cur_sstable to handle data. If that one fills up, and the first
+ * compaction hasn't finished, then we simply have to block.
+ */
+pub struct KVS {
+    options: KVSOptions,
+    compaction_running: AtomicBool, // indicates a compaction is running
+    cur_sstable_num: u64,
+    cur_data: Data,         // current data for reading & writing new data
+    new_data: Option<Data>, // new files that are being created, but still read for old data
 }
 
 /// Gets the timestamp/epoch in ms
@@ -211,13 +225,19 @@ impl KVS {
             }
         }
 
-        return Ok(KVS {
-            options: options,
-            cur_sstable_num: max_sstable_num + 1,
+        let cur_data = Data {
             wal_file: wal_file,
             mem_table: mem_table,
             cur_sstable: sstable_current,
             sstables: sstables,
+        };
+
+        return Ok(KVS {
+            options: options,
+            compaction_running: AtomicBool::new(false),
+            cur_sstable_num: max_sstable_num + 1,
+            cur_data: cur_data,
+            new_data: None
         })
     }
 
@@ -233,9 +253,9 @@ impl KVS {
     ///
     /// let kvs = KVS::open("/tmp/kvs").unwrap();
     /// ```
-    pub fn open(db_dir: &PathBuf) -> Result<KVS, IOError> {
-
-    }
+//    pub fn open(db_dir: &PathBuf) -> Result<KVS, IOError> {
+//
+//    }
 
     /// Returns the path to the WAL file (or new one)
     fn wal_file_path(&self, new: bool) -> PathBuf {
@@ -273,23 +293,24 @@ impl KVS {
         // rename the new to old
         fs::rename(self.wal_file_path(true), &self.wal_file_path(false)).expect(&format!("Error renaming WAL file: {:?} -> {:?}", self.wal_file_path(true), self.wal_file_path(false)));
 
-        self.wal_file = RecordFile::new(&self.wal_file_path(false), WAL_HEADER, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error opening WAL file: {:?}", self.wal_file_path(false)));
+        // set the WAL file in cur_data
+        self.cur_data.wal_file = RecordFile::new(&self.wal_file_path(false), WAL_HEADER, self.options.rec_file_buffer_size, self.options.rec_file_cache_size).expect(&format!("Error opening WAL file: {:?}", self.wal_file_path(false)));
     }
 
     /// flush the mem_table to disk
-    /// return: true if the flush occured
+    /// return: true if the flush occurred
     fn flush(&mut self, check_size: bool) -> bool {
         debug!("Starting a flush");
 
-        if check_size && self.mem_table.len() < self.options.max_mem_count {
-            debug!("Too few records in mem_table: {} < {}", self.mem_table.len(), self.options.max_mem_count);
+        if check_size && self.cur_data.mem_table.len() < self.options.max_mem_count {
+            debug!("Too few records in mem_table: {} < {}", self.cur_data.mem_table.len(), self.options.max_mem_count);
             return false; // don't need to do anything yet
         }
 
         // update the reference to our current SSTable
-        self.cur_sstable = {
-            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
-            let ss_it: Box<Iterator<Item=Record>> = Box::new(self.cur_sstable.iter());
+        self.cur_data.cur_sstable = {
+            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.cur_data.mem_table.values().map(move |r| r.to_owned()));
+            let ss_it: Box<Iterator<Item=Record>> = Box::new(self.cur_data.cur_sstable.iter());
 
             // create an iterator that merge-sorts and also coalesces out similar records
             let mut it = kmerge(vec![mem_it, ss_it]).coalesce(coalesce_records);
@@ -313,7 +334,7 @@ impl KVS {
         };
 
         // remove everything in the mem_table
-        self.mem_table.clear();
+        self.cur_data.mem_table.clear();
 
         // update the WAL file
         self.update_wal_file();
@@ -329,17 +350,41 @@ impl KVS {
         debug!("Starting a compaction");
 
         // we wait until we have enough records for every file to get self.options.max_mem_count
-        if self.mem_table.len() as u64 + self.cur_sstable.record_count() < (self.options.max_mem_count * self.options.file_count) as u64 {
-            debug!("Not enough records for compact: {} < {}", self.mem_table.len() as u64 + self.cur_sstable.record_count(), (self.options.max_mem_count * self.options.file_count) as u64);
+        if self.cur_data.mem_table.len() as u64 + self.cur_data.cur_sstable.record_count() < (self.options.max_mem_count * self.options.file_count) as u64 {
+            debug!("Not enough records for compact: {} < {}", self.cur_data.mem_table.len() as u64 + self.cur_data.cur_sstable.record_count(), (self.options.max_mem_count * self.options.file_count) as u64);
             return false;
         }
 
-        // save off the file paths to the old SSTables as it's not nice to delete files that are still open
-        let sstable_paths = self.sstables.iter().map(|table| table.file_path()).collect::<Vec<_>>();
+        // attempt to get the "mutex" for compaction
+        // compare_swap always returns the "previous" value
+        // if a compaction is running (value = true), and try to set to true, won't work and return true, so we have to wait
+        // if a compaction isn't running (value = false), and try to set to true, will work and return prev value of false
+        while self.compaction_running.compare_and_swap(false, true, Ordering::Relaxed) == true {
+            yield_now(); // yield the CPU so we don't busy wait
+        }
 
-        // create iterators for all the SSTables and the mem_table
+        // create a new mem_table and save off the old one
+        let new_mem_table = BTreeMap::new();
+        let prev_mem_table = self.cur_data.mem_table;
+        self.cur_data.mem_table = new_mem_table;
+
+        // create a new cur_sstable, and save off the old one
+        let prev_sstable_path = self.options.db_dir.join("table.current-prev"); // TODO: update sstable_path function to handle this
+        fs::rename(self.cur_sstable_path(false), &prev_sstable_path).expect("Error renaming table.current to table.curent-prev");
+        let cur_sstable = self.cur_data.cur_sstable; // save off the current one
+        let new_sstable = SSTable::new(&prev_ssstable_path, &mut iter::empty::<Record>(), options.group_count, None, options.rec_file_buffer_size, options.rec_file_cache_size).expect("Error creating new ")
+        self.cur_data.cur_sstable = new_sstable; // assign the new one
+
+        //
+        // TODO: Keep working on conversion
+        //
+
+        // save off the file paths to the old SSTables as it's not nice to delete files that are still open
+        let sstable_paths = self.cur_data.sstables.iter().map(|table| table.file_path()).collect::<Vec<_>>();
+
         self.sstables = {
-            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.mem_table.values().map(move |r| r.to_owned()));
+            // create iterators for all the SSTables and the mem_table
+            let mem_it: Box<Iterator<Item=Record>> = Box::new(prev_mem_table.values().map(move |r| r.to_owned()));
             let ss_cur_it: Box<Iterator<Item=Record>> = Box::new(self.cur_sstable.iter());
             let mut ss_its = Vec::with_capacity(self.options.file_count + 2);
             let mut record_count = self.mem_table.len() as u64 + self.cur_sstable.record_count();
