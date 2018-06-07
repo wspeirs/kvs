@@ -148,7 +148,6 @@ impl RecordFile {
     /// Appends a record to the end of the file without flushing to disk
     /// Returns the location where the record was written
     pub fn append(&mut self, record: &[u8]) -> Result<u64, IOError> {
-//        let writer = self.writer.get_mut();
         let mut writer = self.writer.write().expect("Error getting write lock for writer");
         let rec_loc = writer.seek(SeekFrom::End(0))?;
         let rec_size = record.len();
@@ -166,7 +165,6 @@ impl RecordFile {
     }
 
     pub fn append_record(&mut self, rec: &Record) -> Result<u64, IOError> {
-//        let writer = self.writer.get_mut();
         let mut writer = self.writer.write().expect("Error getting write lock for writer");
         let rec_loc = writer.seek(SeekFrom::End(0))?;
 
@@ -196,7 +194,6 @@ impl RecordFile {
     }
 
     pub fn flush(&mut self) {
-//        let writer = self.writer.get_mut();
         let mut writer = self.writer.write().expect("Error getting write lock for writer");
         writer.seek(SeekFrom::Start(self.header_len as u64)).expect("Error seeking");
         writer.write_u32::<LE>(self.record_count).expect("Error writing record count"); // cannot return an error, so best attempt

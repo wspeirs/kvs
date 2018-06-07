@@ -362,8 +362,6 @@ impl KVS {
     fn compact(prev_data: &Option<Data>, sstables: &RwLock<BTreeSet<SSTable>>, options: &KVSOptions, cur_sstable_num: &AtomicUsize) {
         debug!("Starting a compaction");
 
-        let c = prev_data.unwrap();
-
         // save off the file paths to the old SSTables as it's not nice to delete files that are still open
         let sstable_paths = { sstables.read().expect("Error getting read lock for SSTables").iter().map(|table| table.file_path()).collect::<Vec<_>>() };
 
