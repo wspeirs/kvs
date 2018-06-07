@@ -7,6 +7,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::fs::{File, OpenOptions};
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write, BufWriter};
 use std::path::PathBuf;
+use std::sync::{RwLock, Mutex};
 
 use record::{Record, VALUE_SENTINEL};
 
@@ -34,12 +35,12 @@ pub const BAD_COUNT: u32 = 0xFFFFFFFF;
 /// Record file
 pub struct RecordFile {
     fd: File,           // actual file
-    writer: RefCell<BufWriter<File>>,  // buffered writer
+    writer: RwLock<BufWriter<File>>,  // buffered writer
     file_path: PathBuf, // location of the file on disk
     record_count: u32,  // number of records in the file
     header_len: usize,  // length of the header
     last_record: u64,   // the start of the last record
-    record_cache: RefCell<LruCache<u64, Vec<u8>>>
+    record_cache: Mutex<LruCache<u64, Vec<u8>>>
 }
 
 pub fn buf2string(buf: &[u8]) -> String {
@@ -118,7 +119,7 @@ impl RecordFile {
             );
         }
 
-        let writer = RefCell::new(BufWriter::with_capacity(buffer_size, fd.try_clone().expect("Unable to create RecordFile writer")));
+        let writer = RwLock::new(BufWriter::with_capacity(buffer_size, fd.try_clone().expect("Unable to create RecordFile writer")));
 
         Ok(RecordFile {
             fd,
@@ -127,7 +128,7 @@ impl RecordFile {
             record_count,
             header_len: header.len(),
             last_record,
-            record_cache: RefCell::new(LruCache::new(cache_size))
+            record_cache: Mutex::new(LruCache::new(cache_size))
         })
     }
 
@@ -147,7 +148,8 @@ impl RecordFile {
     /// Appends a record to the end of the file without flushing to disk
     /// Returns the location where the record was written
     pub fn append(&mut self, record: &[u8]) -> Result<u64, IOError> {
-        let writer = self.writer.get_mut();
+//        let writer = self.writer.get_mut();
+        let mut writer = self.writer.write().expect("Error getting write lock for writer");
         let rec_loc = writer.seek(SeekFrom::End(0))?;
         let rec_size = record.len();
 
@@ -158,13 +160,14 @@ impl RecordFile {
         self.last_record = rec_loc;
 
         // add to our cache
-        self.record_cache.get_mut().insert(rec_loc, record.to_owned());
+        self.record_cache.lock().expect("Error getting write lock for record_cache").insert(rec_loc, record.to_owned());
 
         Ok(rec_loc)
     }
 
     pub fn append_record(&mut self, rec: &Record) -> Result<u64, IOError> {
-        let writer = self.writer.get_mut();
+//        let writer = self.writer.get_mut();
+        let mut writer = self.writer.write().expect("Error getting write lock for writer");
         let rec_loc = writer.seek(SeekFrom::End(0))?;
 
         writer.write_u32::<LE>(rec.size())?; // write out the total size of this serialization
@@ -193,7 +196,8 @@ impl RecordFile {
     }
 
     pub fn flush(&mut self) {
-        let writer = self.writer.get_mut();
+//        let writer = self.writer.get_mut();
+        let mut writer = self.writer.write().expect("Error getting write lock for writer");
         writer.seek(SeekFrom::Start(self.header_len as u64)).expect("Error seeking");
         writer.write_u32::<LE>(self.record_count).expect("Error writing record count"); // cannot return an error, so best attempt
         writer.write_u64::<LE>(self.last_record).expect("Error writing last record");  // write out the end of the file
@@ -202,20 +206,23 @@ impl RecordFile {
 
     /// Read a record from a given offset
     pub fn read_at(&self, file_offset: u64) -> Result<Vec<u8>, IOError> {
-        if let Some(ret) = self.record_cache.borrow_mut().get_mut(&file_offset) {
-            return Ok(ret.to_vec());
+        {
+            if let Some(ret) = self.record_cache.lock().expect("Error getting read lock for record_cache").get_mut(&file_offset) {
+                return Ok(ret.to_vec());
+            }
         }
 
-        self.writer.borrow_mut().flush()?; // need to flush any existing writes to disk
+        // need to flush any existing writes to disk
+        { self.writer.write().expect("Error getting write lock for writer").flush()?; }
         let rec_size = self.fd.read_u32_at::<LE>(file_offset)?;
         let mut rec_buff = vec![0; rec_size as usize];
 
-        debug!("ATTEMPTING TO READ RECORD OF SIZE {} FROM {}", rec_size, file_offset);
+//        debug!("ATTEMPTING TO READ RECORD OF SIZE {} FROM {}", rec_size, file_offset);
 
         self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
 
         // add to our cache
-        self.record_cache.borrow_mut().insert(file_offset, rec_buff.to_owned());
+        self.record_cache.lock().expect("Error getting write lock for record_cache").insert(file_offset, rec_buff.to_owned());
 
         Ok(rec_buff)
     }
@@ -232,7 +239,7 @@ impl RecordFile {
         self.fd.write_all_at(file_offset + U32_SIZE as u64, &record)?;
 
         // add to our cache
-        self.record_cache.get_mut().insert(file_offset, record.to_owned());
+        self.record_cache.lock().expect("Error getting write lock for record_cache").insert(file_offset, record.to_owned());
 
         Ok( () )
     }
@@ -326,7 +333,7 @@ impl Iterator for RecordFileIterator {
     fn next(&mut self) -> Option<Self::Item> {
         // move to the start of the records if this is the first time through
         if self.cur_record == 0 {
-            self.record_file.get_mut().writer.borrow_mut().flush().expect("Failed to flush writer to disk");
+            self.record_file.get_mut().writer.write().expect("Error getting write lock for record_file").flush().expect("Failed to flush writer to disk");
             let offset = (self.record_file.borrow().header_len as usize + U32_SIZE + U64_SIZE) as u64;
             self.record_file.get_mut().fd.seek(SeekFrom::Start(offset)).unwrap();
         }
