@@ -213,7 +213,7 @@ impl SSTable {
             Err(i) => i-1
         }];
 
-        debug!("Top-level binary search: {:?} -> {}", top_index_res, start_offset);
+//        debug!("Top-level binary search: {:?} -> {}", top_index_res, start_offset);
 
         // need to fetch the group indices array from rec_file
         let group_indices_offset = start_offset - ((self.info.group_count as usize * U64_SIZE) + U32_SIZE) as u64;
@@ -234,7 +234,7 @@ impl SSTable {
             rec.key().cmp(&key)
         });
 
-        debug!("Group binary search: {:?}", group_index_res);
+//        debug!("Group binary search: {:?}", group_index_res);
 
         // convert from binary_search result to actual result
         let ret = match group_index_res {

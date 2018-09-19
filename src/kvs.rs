@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use itertools::kmerge;
 use itertools::Itertools;
-
+use rmps::encode::write;
+use rmps::decode::from_read;
 use regex::Regex;
+use walkdir::WalkDir;
 
 use record_file::RecordFile;
 use sstable::SSTable;
@@ -27,7 +29,7 @@ const DEFAULT_FILE_COUNT: usize = 6;
 const DEFAULT_BUFFER_SIZE: usize = 4096;
 const DEFAULT_CACHE_SIZE: usize = 100_000;
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KVSOptions {
     max_mem_count: usize,
     group_count: u32,
@@ -148,9 +150,9 @@ struct Data {
 pub struct KVS {
     options: KVSOptions,
     compaction_running: Arc<AtomicBool>, // indicates a compaction is running
-    cur_sstable_num: Arc<AtomicUsize>, //Arc<u64>,
-    cur_data: Data,          // current data for reading & writing new data
-    prev_data: Arc<Option<Data>>, // previous data that needs to be checked by get() during a compaction
+    cur_sstable_num: Arc<AtomicUsize>,   // Arc<u64>,
+    cur_data: Data,                      // current data for reading & writing new data
+    prev_data: Arc<Option<Data>>,        // previous data that needs to be checked by get() during a compaction
     sstables: Arc<RwLock<BTreeSet<SSTable>>>,
 }
 
@@ -182,6 +184,65 @@ fn coalesce_records(prev: Record, curr: Record) -> Result<Record, (Record, Recor
 impl KVS {
     /// Creates a new KVS given a directory to store the files
     fn new(options: &KVSOptions) -> Result<KVS, IOError> {
+        let db_dir_path = options.db_dir.to_path_buf();
+
+        // check to see if the directory is empty or not
+        if WalkDir::new(&db_dir_path).max_depth(0).into_iter().count() > 0 {
+            return Err(IOError::new(ErrorKind::AlreadyExists, "Files already exist in the current directory"));
+        }
+
+        // otherwise, just call open which can handle constructing a new instance
+        let ret = KVS::do_open(options);
+
+        return match ret {
+            Ok(kvs) => {
+                let mut fd = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&db_dir_path.join("options.kvs"))?;
+
+                // write out the options to a file
+                write(&mut fd, &kvs.options).expect("Error writing options file");
+
+                return Ok(kvs);
+            },
+            Err(e) => Err(e)
+        };
+    }
+
+    /// Opens an existing KVS directory/database.
+    ///
+    /// All of the original options used to create the KVS instance will be used when open.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::path::PathBuf;
+    /// use kvs::{KVS, KVSOptions};
+    ///
+    /// let path = PathBuf::from("/tmp/kvs");
+    ///
+    /// {   // scope so it is dropped after creating
+    ///     KVSOptions::new(&path).create().unwrap();
+    /// }
+    ///
+    /// let kvs = KVS::open(&path).unwrap();
+    /// ```
+    pub fn open(db_dir: &PathBuf) -> Result<KVS, IOError> {
+        let db_dir_path = db_dir.to_path_buf();
+
+        let fd = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .open(&db_dir_path.join("options.kvs"))?;
+
+        let options :KVSOptions = from_read(fd).expect("Error reading options file");
+
+        return KVS::do_open(&options);
+    }
+
+    fn do_open(options: &KVSOptions) -> Result<KVS, IOError> {
         let db_dir = options.db_dir.to_path_buf();
         let mut mem_table = BTreeMap::new();
 
@@ -208,6 +269,30 @@ impl KVS {
         let re = Regex::new(r"^table-(\d+).data$").unwrap();
         let mut max_sstable_num : u64 = 0;
 
+        for entry in WalkDir::new(db_dir.to_path_buf()).max_depth(0) {
+            let entry = entry.expect("Error reading directory entry");
+            let path = entry.path();
+
+            if path.is_dir() {
+                continue
+            }
+
+            let file_name = path.file_name().expect("Error getting file name");
+            let captures = re.captures(file_name.to_str().expect("Error getting string for file name"));
+
+            if let Some(capture) = captures {
+                // add to our set of tables
+                sstables.insert(SSTable::open(&path.to_path_buf(), options.rec_file_buffer_size, options.rec_file_cache_size)?);
+
+                // get the number of the table
+                let sstable_num = capture.get(1).expect("Error capturing SSTable number").as_str().parse::<u64>().expect("Error parsing number");
+
+                if sstable_num > max_sstable_num {
+                    max_sstable_num = sstable_num;
+                }
+            }
+        }
+/*
         // gather up all the SSTables in this directory
         for entry in fs::read_dir(db_dir.to_path_buf())? {
             let entry = entry.expect("Error reading directory entry");
@@ -232,7 +317,7 @@ impl KVS {
                 }
             }
         }
-
+*/
         let cur_data = Data {
             wal_file: wal_file,
             mem_table: mem_table,
@@ -247,27 +332,6 @@ impl KVS {
             prev_data: Arc::new(None),
             sstables: Arc::new(RwLock::new(sstables)),
         })
-    }
-
-    /// Opens an existing KVS directory/database.
-    ///
-    /// All of the original options used to create the KVS instance will be used when open.
-    ///
-    /// # Examples
-    /// ```
-    /// use std::path::PathBuf;
-    /// use kvs::{KVS, KVSOptions};
-    ///
-    /// let path = PathBuf::from("/tmp/kvs");
-    ///
-    /// {   // scope so it is dropped after opening
-    ///     KVSOptions::new(&path).create().unwrap();
-    /// }
-    ///
-    /// let kvs = KVS::open(&path).unwrap();
-    /// ```
-    pub fn open(db_dir: &PathBuf) -> Result<KVS, IOError> {
-        Err(IOError::new(ErrorKind::Other, "not yet implemented"))
     }
 
     /// Returns the path to the WAL file (or new one)
@@ -428,11 +492,11 @@ impl KVS {
     }
 
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
-        debug!("Called get: {:?}", key);
+//        debug!("Called get: {:?}", key);
 
         let cur_time = get_timestamp();
 
-        debug!("MEM TABLE: {}", self.cur_data.mem_table.len());
+//        debug!("MEM TABLE: {}", self.cur_data.mem_table.len());
 
         // first check the mem_table
         if self.cur_data.mem_table.contains_key(key) {
@@ -459,7 +523,7 @@ impl KVS {
 
         // then go to previous mem_table and SSTable
         if let Some(ref prev_data) = *self.prev_data {
-            debug!("We have prev_data: MEM_TABLE {}  SSTABLE: {}", prev_data.mem_table.len(), prev_data.cur_sstable.record_count());
+//            debug!("We have prev_data: MEM_TABLE {}  SSTABLE: {}", prev_data.mem_table.len(), prev_data.cur_sstable.record_count());
 
             // first check the mem_table
             if prev_data.mem_table.contains_key(key) {
@@ -576,8 +640,6 @@ impl KVS {
                     // run the compaction
                     KVS::compact(&prev_data, &sstables, &options, &cur_sstable_num);
 
-//                    *Arc::make_mut(&mut num) = new_sstable_num;
-
                     // remove the previous SSTable
                     fs::remove_file(&prev_sstable_path).expect(&format!("Error removing previous SSTable: {:?}", prev_sstable_path));
 
@@ -645,6 +707,13 @@ impl KVS {
 impl Drop for KVS {
     fn drop(&mut self) {
         debug!("KVS Drop");
+
+        // check to see if a compaction is running in the background
+        while self.compaction_running.compare_and_swap(false, true, Ordering::Relaxed) == true {
+            debug!("YIELDING PROCESSOR");
+            yield_now(); // yield the CPU so we don't busy wait
+        }
+
         // call flush without checking the size
         self.flush(false);
     }
@@ -859,11 +928,15 @@ mod tests {
 
 //        assert_eq!(kvs.count_estimate(), (MAX_MEM_COUNT*MAX_FILE_COUNT + 1) as u64);
 
+        debug!("STARTING GETS");
+
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
             let key = format!("KEY_{}", i).as_bytes().to_vec();
 
             assert!(kvs.get(&key).is_some(), "Couldn't find key: {}", i);
         }
+
+        debug!("FINISHED GETS");
     }
 
     #[test]
