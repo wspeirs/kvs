@@ -322,8 +322,8 @@ impl KVS {
 
         // update the reference to our current SSTable
         self.cur_data.cur_sstable = {
-            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.cur_data.mem_table.values().map(move |r| r.to_owned()));
-            let ss_it: Box<Iterator<Item=Record>> = Box::new(self.cur_data.cur_sstable.iter());
+            let mem_it: Box<dyn Iterator<Item=Record>> = Box::new(self.cur_data.mem_table.values().map(move |r| r.to_owned()));
+            let ss_it: Box<dyn Iterator<Item=Record>> = Box::new(self.cur_data.cur_sstable.iter());
 
             // create an iterator that merge-sorts and also coalesces out similar records
             let mut it = kmerge(vec![mem_it, ss_it]).coalesce(coalesce_records);
@@ -369,8 +369,8 @@ impl KVS {
             let sstables = sstables.read().expect("Error getting read lock for SSTables");
 
             // create iterators for all the SSTables and the mem_table
-            let mem_table_it: Box<Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new( pd.mem_table.values().map(move |r| r.to_owned())) } else { Box::new(iter::empty::<Record>()) };
-            let cur_sstable_it: Box<Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new(pd.cur_sstable.iter()) } else { Box::new(iter::empty::<Record>()) };
+            let mem_table_it: Box<dyn Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new( pd.mem_table.values().map(move |r| r.to_owned())) } else { Box::new(iter::empty::<Record>()) };
+            let cur_sstable_it: Box<dyn Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new(pd.cur_sstable.iter()) } else { Box::new(iter::empty::<Record>()) };
             let mut record_its = Vec::with_capacity(options.file_count + 2); // make space for iterators for each SSTable + cur_sstable + mem_table
             let mut record_count = if let Some(pd) = prev_data { pd.mem_table.len() as u64 + pd.cur_sstable.record_count() } else { 0 };
 
