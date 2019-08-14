@@ -46,7 +46,7 @@ impl KVSOptions {
     /// use kvs::KVSOptions;
     /// use std::path::PathBuf;
     ///
-    /// let kvs = KVSOptions::new(&PathBuf::from("/tmp/kvs")).create().unwrap();
+    /// let kvs = KVSOptions::new(&PathBuf::from("/tmp/")).create().unwrap();
     /// ```
     pub fn new(db_dir: &PathBuf) -> KVSOptions {
         KVSOptions { max_mem_count: DEFAULT_MEM_COUNT,
@@ -118,7 +118,7 @@ impl KVSOptions {
     /// use kvs::KVSOptions;
     /// use std::path::PathBuf;
     ///
-    /// let kvs = KVSOptions::new(&PathBuf::from("/tmp/kvs")).create().expect("Error creating KVS");
+    /// let kvs = KVSOptions::new(&PathBuf::from("/tmp/")).create().expect("Error creating KVS");
     /// ```
     /// # Panics
     /// If any of the options are nonsensical.
@@ -258,7 +258,7 @@ impl KVS {
     /// use std::path::PathBuf;
     /// use kvs::{KVS, KVSOptions};
     ///
-    /// let path = PathBuf::from("/tmp/kvs");
+    /// let path = PathBuf::from("/tmp/");
     ///
     /// {   // scope so it is dropped after opening
     ///     KVSOptions::new(&path).create().unwrap();

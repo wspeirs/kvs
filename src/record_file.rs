@@ -13,6 +13,8 @@ use record::{Record, VALUE_SENTINEL};
 
 use U32_SIZE;
 use U64_SIZE;
+use std::borrow::BorrowMut;
+use std::ops::DerefMut;
 
 /// This struct represents the on-disk format of the RecordFile
 /// |---------------------------|
@@ -168,24 +170,7 @@ impl RecordFile {
         let mut writer = self.writer.write().expect("Error getting write lock for writer");
         let rec_loc = writer.seek(SeekFrom::End(0))?;
 
-        writer.write_u32::<LE>(rec.size())?; // write out the total size of this serialization
-
-        // the serialization
-        writer.write_u64::<LE>(rec.key().len() as u64)?; // length of key
-
-        writer.write_all(&rec.key())?; // write the actual key's data
-
-        if !rec.is_delete() {
-            let value = rec.value().to_owned();
-
-            writer.write_u64::<LE>(value.len() as u64)?; // write the size of the value
-            writer.write_all(&value)?;
-        } else {
-            writer.write_u64::<LE>(VALUE_SENTINEL)?; // sentinel value for no value
-        }
-
-        writer.write_u64::<LE>(rec.created())?;
-        writer.write_u64::<LE>(rec.ttl())?;
+        rec.serialize(writer.deref_mut())?;
 
         self.record_count += 1;
         self.last_record = rec_loc;
