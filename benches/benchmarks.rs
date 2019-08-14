@@ -3,7 +3,7 @@
 extern crate kvs;
 extern crate test;
 
-use kvs::KVS;
+use kvs::{KVSOptions, KVS};
 
 extern crate elapsed;
 extern crate rand;
@@ -39,7 +39,7 @@ fn put(start: u64, end: u64, db: &mut KVS, is_update: bool) -> u64 {
 
 fn get(start: u64, end: u64, db: &KVS) -> u64 {
     let range = if start < end {
-        Box::new(start..end) as Box<Iterator<Item=_>>
+        Box::new(start..end) as Box<dyn Iterator<Item=_>>
     } else {
         Box::new((end..start).rev())
     };
@@ -86,9 +86,12 @@ fn full(bencher: &mut Bencher) {
 
     create_dir(&ret_dir).unwrap();
 
-    let mut kvs = KVS::new(&PathBuf::from(ret_dir)).expect("Error creating KVS");
+    let mut kvs = KVSOptions::new(&PathBuf::from(ret_dir))
+        .group_count(50_000)
+        .create()
+        .expect("Error creating KVS");
 
-    let num: u64 = 1_000_000;
+    let num: u64 = 10_000;
 
     // Working roughly off this: https://www.influxdata.com/blog/benchmarking-leveldb-vs-rocksdb-vs-hyperleveldb-vs-lmdb-performance-for-influxdb/
     // Benchmarks for each:
@@ -129,7 +132,11 @@ fn gets(bencher: &mut Bencher) {
 
     create_dir(&ret_dir).unwrap();
 
-    let mut kvs = KVS::new(&PathBuf::from(ret_dir)).expect("Error creating KVS");
+    let mut kvs = KVSOptions::new(&PathBuf::from(ret_dir))
+        .group_count(100)
+        .cache_size(500_000)
+        .create()
+        .expect("Error creating KVS");
 
     let num: u64 = 100_000;
 
@@ -141,7 +148,9 @@ fn gets(bencher: &mut Bencher) {
     sum += get(0, num, &kvs);
     sum += get(0, num, &kvs);
 
-    println!("Avg: {}ms", sum / 3);
+    println!("Avg: {}ms", sum as f64 / (3.0 * num as f64));
+
+    kvs.print_sstable_stats();
 
 //    get(num, 0, &kvs);
 }

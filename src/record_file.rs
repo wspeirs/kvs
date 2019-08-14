@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write, BufWriter};
 use std::path::PathBuf;
 use std::sync::{RwLock, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use record::{Record, VALUE_SENTINEL};
 
@@ -42,7 +43,9 @@ pub struct RecordFile {
     record_count: u32,  // number of records in the file
     header_len: usize,  // length of the header
     last_record: u64,   // the start of the last record
-    record_cache: Mutex<LruCache<u64, Vec<u8>>>
+    record_cache: Mutex<LruCache<u64, Vec<u8>>>,
+    cache_hit: AtomicUsize,
+    cache_count: AtomicUsize
 }
 
 pub fn buf2string(buf: &[u8]) -> String {
@@ -130,13 +133,19 @@ impl RecordFile {
             record_count,
             header_len: header.len(),
             last_record,
-            record_cache: Mutex::new(LruCache::new(cache_size))
+            record_cache: Mutex::new(LruCache::new(cache_size)),
+            cache_hit: AtomicUsize::new(0),
+            cache_count: AtomicUsize::new(0)
         })
     }
 
     /// Returns the number of records in this file
     pub fn record_count(&self) -> u32 {
         self.record_count
+    }
+
+    pub fn cache_hit_rate(&self) -> f64 {
+        self.cache_hit.load(Ordering::Relaxed) as f64 / self.cache_count.load(Ordering::Relaxed) as f64
     }
 
     pub fn file_path(&self) -> PathBuf {
@@ -188,19 +197,25 @@ impl RecordFile {
 
     /// Read a record from a given offset
     pub fn read_at(&self, file_offset: u64) -> Result<Vec<u8>, IOError> {
+        self.cache_count.fetch_add(1, Ordering::Relaxed);
+
         {
             if let Some(ret) = self.record_cache.lock().expect("Error getting read lock for record_cache").get_mut(&file_offset) {
+                self.cache_hit.fetch_add(1, Ordering::Relaxed); // increase our hit counter
                 return Ok(ret.to_vec());
             }
         }
 
         // need to flush any existing writes to disk
         { self.writer.write().expect("Error getting write lock for writer").flush()?; }
+
+        // read the record size and create a buffer for it
         let rec_size = self.fd.read_u32_at::<LE>(file_offset)?;
         let mut rec_buff = vec![0; rec_size as usize];
 
 //        debug!("ATTEMPTING TO READ RECORD OF SIZE {} FROM {}", rec_size, file_offset);
 
+        // read in that buffer
         self.fd.read_exact_at(file_offset + U32_SIZE as u64, &mut rec_buff)?;
 
         // add to our cache

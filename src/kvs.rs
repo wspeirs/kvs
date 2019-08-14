@@ -124,7 +124,7 @@ impl KVSOptions {
     /// If any of the options are nonsensical.
     pub fn create(&self) -> Result<KVS, IOError> {
         if self.max_mem_count < 2 { panic!("mem_count must be greater than 1: {}", self.max_mem_count); }
-        if self.group_count < 100 { panic!("group_count is too small, make > 100: {}", self.group_count); }
+        if self.group_count <= 10 { panic!("group_count is too small, make > 10: {}", self.group_count); }
         if self.file_count < 2 { panic!("file_count is too small, try > 2: {}", self.file_count); }
         if self.rec_file_buffer_size < 4096 { panic!("file_buffer is too small, try > 4096: {}", self.rec_file_buffer_size); }
         if self.rec_file_cache_size < 1 { panic!("cache_size must be greater than 1: {}", self.rec_file_cache_size); }
@@ -247,6 +247,19 @@ impl KVS {
             prev_data: Arc::new(None),
             sstables: Arc::new(RwLock::new(sstables)),
         })
+    }
+
+    pub fn print_sstable_stats(&self) {
+        println!("STATS: ");
+        let (c, hr) = self.cur_data.cur_sstable.get_stats();
+
+        println!("{}: {}", c, hr);
+
+        for sstable in self.sstables.read().unwrap().iter() {
+            let (c, hr) = sstable.get_stats();
+
+            println!("{}: {}", c, hr);
+        }
     }
 
     /// Opens an existing KVS directory/database.
@@ -435,9 +448,7 @@ impl KVS {
         debug!("MEM TABLE: {}", self.cur_data.mem_table.len());
 
         // first check the mem_table
-        if self.cur_data.mem_table.contains_key(key) {
-            let rec = self.cur_data.mem_table.get(key).unwrap();
-
+        if let Some(rec) = self.cur_data.mem_table.get(key) {
             // found an expired or deleted key
             return if rec.is_expired(cur_time) || rec.is_delete() {
                 debug!("Found expired or deleted key");

@@ -260,6 +260,14 @@ impl SSTable {
     pub fn record_count(&self) -> u64 { self.info.record_count }
 
     pub fn file_path(&self) -> PathBuf { self.rec_file.file_path() }
+
+    /// Get statistics about this SSTable
+    /// Returns the number of records in the file, and the cache hit rate
+    pub fn get_stats(&self) -> (u32, f64) {
+        (self.rec_file.record_count(),
+            self.rec_file.cache_hit_rate()
+        )
+    }
 }
 
 impl Debug for SSTable {
