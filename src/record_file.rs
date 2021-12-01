@@ -1,6 +1,7 @@
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use lru_cache::LruCache;
-use positioned_io::{ReadAt, WriteAt, WriteBytesExt as PositionedWriteBytesExt, ReadBytesExt as PositionedReadBytesExt};
+use positioned_io::{ReadAt, WriteAt, WriteBytesAtExt, ReadBytesAtExt};
+
 
 use std::cell::RefCell;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
@@ -9,10 +10,10 @@ use std::io::{Error as IOError, ErrorKind, Read, Seek, SeekFrom, Write, BufWrite
 use std::path::PathBuf;
 use std::sync::{RwLock, Mutex};
 
-use record::{Record, VALUE_SENTINEL};
+use crate::record::{Record, VALUE_SENTINEL};
 
-use U32_SIZE;
-use U64_SIZE;
+use crate::U32_SIZE;
+use crate::U64_SIZE;
 
 /// This struct represents the on-disk format of the RecordFile
 /// |---------------------------|
@@ -29,7 +30,7 @@ use U64_SIZE;
 /// | ...                       |
 /// |---------------------------|
 
-pub const BAD_COUNT: u32 = 0xFFFFFFFF;
+pub const BAD_COUNT: u32 = 0xFFFF_FFFF;
 
 
 /// Record file
@@ -50,7 +51,7 @@ pub fn buf2string(buf: &[u8]) -> String {
         ret.push_str(format!("{:02X} ", b).as_str());
     }
 
-    return ret;
+    ret
 }
 
 fn rec_to_string(size: u32, rec: &[u8]) -> String {
@@ -59,7 +60,7 @@ fn rec_to_string(size: u32, rec: &[u8]) -> String {
     dbg_buf.push_str(format!("{:08X} ", size).as_str());
     dbg_buf.push_str(buf2string(&rec).as_str());
 
-    return dbg_buf;
+    dbg_buf
 }
 
 impl RecordFile {
@@ -78,7 +79,7 @@ impl RecordFile {
 
         // check to see if we're opening a new/blank file or not
         if fd.metadata()?.len() == 0 {
-            fd.write(header)?;
+            fd.write_all(header)?;
             fd.write_u32::<LE>(BAD_COUNT)?; // record count
             fd.write_u64::<LE>(last_record)?;
 
@@ -153,7 +154,7 @@ impl RecordFile {
         let rec_size = record.len();
 
         writer.write_u32::<LE>(rec_size as u32)?;
-        writer.write(record)?;
+        writer.write_all(record)?;
 
         self.record_count += 1;
         self.last_record = rec_loc;
@@ -285,9 +286,7 @@ impl<'a> Iterator for Iter<'a> {
     type Item = Vec<u8>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur_offset.is_none() {
-            return None;
-        }
+        self.cur_offset?;
 
         let rec = match self.record_file.read_at(self.cur_offset.unwrap()) {
                 Err(e) => panic!("Error reading file at {}: {}", self.cur_offset.unwrap(), e.to_string()),
@@ -422,13 +421,14 @@ impl<'a> Iterator for MutRecordFileIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use record_file::RecordFile;
+    use crate::record_file::RecordFile;
 
     use simple_logger;
     use std::path::PathBuf;
     use std::io::{Seek, SeekFrom, Write};
     use rand::{thread_rng, Rng};
-    use ::LOGGER_INIT;
+    use rand::distributions::Alphanumeric;
+    use crate::LOGGER_INIT;
 
     const BUFFER_SIZE: usize = 4069;
     const CACHE_SIZE: usize = 100;
@@ -436,7 +436,7 @@ mod tests {
     fn gen_file() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
-        let tmp_name: String = thread_rng().gen_ascii_chars().take(6).collect();
+        let tmp_name: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
         let ret_file = PathBuf::from("/tmp").join(format!("rec_file_{}.data", tmp_name));
 
         debug!("CREATING TMP FILE: {:?}", ret_file);

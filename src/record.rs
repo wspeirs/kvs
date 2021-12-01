@@ -3,14 +3,14 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{Cursor, Error as IOError, Write, Read};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 
-use U32_SIZE;
-use U64_SIZE;
+use crate::U32_SIZE;
+use crate::U64_SIZE;
 
-use record_file::buf2string;
+use crate::record_file::buf2string;
 
-use kvs::get_timestamp;
+use crate::kvs::get_timestamp;
 
-pub const VALUE_SENTINEL: u64 = 0xFF_FF_FF_FF_FF_FF_FF_FF;
+pub const VALUE_SENTINEL: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Record {
@@ -27,10 +27,10 @@ impl Record {
 
     pub fn new_with_ttl(key: Vec<u8>, value: Option<Vec<u8>>, ttl: u64) -> Record {
         Record {
-            key: key,
-            value: value,
+            key,
+            value,
             created: get_timestamp(),
-            ttl: ttl
+            ttl
         }
     }
 
@@ -63,7 +63,7 @@ impl Record {
         writer.write_u64::<LE>(self.created)?;
         writer.write_u64::<LE>(self.ttl)?;
 
-        return Ok(U32_SIZE as u32 + self.size());
+        Ok(U32_SIZE as u32 + self.size())
     }
 
     pub fn deserialize(bytes: Vec<u8>) -> Record {
@@ -155,9 +155,10 @@ impl Debug for Record {
 
 #[cfg(test)]
 mod tests {
-    use record::Record;
     use std::io::Cursor;
-    use ::U32_SIZE;
+
+    use crate::record::Record;
+    use crate::U32_SIZE;
 
     #[test]
     fn serialize_value() {

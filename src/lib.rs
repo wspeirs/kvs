@@ -27,7 +27,7 @@ mod serde_utils;
 
 pub mod kvs;
 
-pub use kvs::{KVSOptions, KVS};
+pub use crate::kvs::{KVSOptions, KVS};
 
 use std::mem;
 

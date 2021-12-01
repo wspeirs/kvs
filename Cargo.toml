@@ -2,25 +2,27 @@
 name = "kvs"
 version = "0.1.0"
 authors = ["William Speirs <bill.speirs@gmail.com>"]
+edition = "2021"
 
 [profile.release]
 debug = true
 
 [dependencies]
-byteorder = "1.2"
-itertools = "0.7"
+byteorder = "1.4"
+#byteorder = "0.5"
+itertools = "0.10"
 log = "0.4"
 lru-cache = "0.1"
-positioned-io = "0.2.2"
-regex = "1.0.0"
-rmp-serde = "0.13"
+positioned-io = "0.3.0"
+regex = "1.5"
+rmp-serde = "0.15"
 serde = "1.0"
 serde_derive = "1.0"
-walkdir = "2.2"
+walkdir = "2.3"
 
 [dev-dependencies]
-rand = "0.4"
-simple_logger = "0.5"
+rand = "0.8"
+simple_logger = "1.15"
 elapsed = "0.1"
 
 [patch.crates-io]

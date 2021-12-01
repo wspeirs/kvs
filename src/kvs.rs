@@ -16,9 +16,9 @@ use rmps::decode::from_read;
 use regex::Regex;
 use walkdir::WalkDir;
 
-use record_file::RecordFile;
-use sstable::SSTable;
-use record::Record;
+use crate::record_file::RecordFile;
+use crate::sstable::SSTable;
+use crate::record::Record;
 
 const WAL_HEADER: &[u8; 8] = b"WAL!\x01\x00\x00\x00";
 
@@ -160,7 +160,7 @@ pub struct KVS {
 pub fn get_timestamp() -> u64 {
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
 
-    return ts.as_secs() * 1000 + ts.subsec_nanos() as u64 / 1_000_000;
+    (ts.as_secs() * 1000) + (ts.subsec_nanos() as u64 / 1_000_000)
 }
 
 
@@ -186,15 +186,18 @@ impl KVS {
     fn new(options: &KVSOptions) -> Result<KVS, IOError> {
         let db_dir_path = options.db_dir.to_path_buf();
 
-        // check to see if the directory is empty or not
-        if WalkDir::new(&db_dir_path).max_depth(0).into_iter().count() > 0 {
+        // check to see if the directory is empty
+        // have to skip the first entry, as it's the directory we give it
+        let file_count = WalkDir::new(&db_dir_path).max_depth(0).into_iter().skip(1).count();
+        if file_count > 0 {
+            error!("Found {} files in {}", file_count, db_dir_path.display());
             return Err(IOError::new(ErrorKind::AlreadyExists, "Files already exist in the current directory"));
         }
 
         // otherwise, just call open which can handle constructing a new instance
         let ret = KVS::do_open(options);
 
-        return match ret {
+        match ret {
             Ok(kvs) => {
                 let mut fd = fs::OpenOptions::new()
                     .read(true)
@@ -208,7 +211,7 @@ impl KVS {
                 return Ok(kvs);
             },
             Err(e) => Err(e)
-        };
+        }
     }
 
     /// Opens an existing KVS directory/database.
@@ -239,7 +242,7 @@ impl KVS {
 
         let options :KVSOptions = from_read(fd).expect("Error reading options file");
 
-        return KVS::do_open(&options);
+        KVS::do_open(&options)
     }
 
     fn do_open(options: &KVSOptions) -> Result<KVS, IOError> {
@@ -318,17 +321,13 @@ impl KVS {
             }
         }
 */
-        let cur_data = Data {
-            wal_file: wal_file,
-            mem_table: mem_table,
-            cur_sstable: sstable_current,
-        };
+        let cur_data = Data {wal_file, mem_table, cur_sstable: sstable_current, };
 
-        return Ok(KVS {
+        Ok(KVS {
             options: options.clone(),
             compaction_running: Arc::new(AtomicBool::new(false)),
             cur_sstable_num: Arc::new(AtomicUsize::new((max_sstable_num + 1) as usize)),
-            cur_data: cur_data,
+            cur_data,
             prev_data: Arc::new(None),
             sstables: Arc::new(RwLock::new(sstables)),
         })
@@ -386,8 +385,8 @@ impl KVS {
 
         // update the reference to our current SSTable
         self.cur_data.cur_sstable = {
-            let mem_it: Box<Iterator<Item=Record>> = Box::new(self.cur_data.mem_table.values().map(move |r| r.to_owned()));
-            let ss_it: Box<Iterator<Item=Record>> = Box::new(self.cur_data.cur_sstable.iter());
+            let mem_it: Box<dyn Iterator<Item=Record>> = Box::new(self.cur_data.mem_table.values().map(move |r| r.to_owned()));
+            let ss_it: Box<dyn Iterator<Item=Record>> = Box::new(self.cur_data.cur_sstable.iter());
 
             // create an iterator that merge-sorts and also coalesces out similar records
             let mut it = kmerge(vec![mem_it, ss_it]).coalesce(coalesce_records);
@@ -433,8 +432,8 @@ impl KVS {
             let sstables = sstables.read().expect("Error getting read lock for SSTables");
 
             // create iterators for all the SSTables and the mem_table
-            let mem_table_it: Box<Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new( pd.mem_table.values().map(move |r| r.to_owned())) } else { Box::new(iter::empty::<Record>()) };
-            let cur_sstable_it: Box<Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new(pd.cur_sstable.iter()) } else { Box::new(iter::empty::<Record>()) };
+            let mem_table_it: Box<dyn Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new( pd.mem_table.values().map(move |r| r.to_owned())) } else { Box::new(iter::empty::<Record>()) };
+            let cur_sstable_it: Box<dyn Iterator<Item=Record>> = if let Some(pd) = prev_data { Box::new(pd.cur_sstable.iter()) } else { Box::new(iter::empty::<Record>()) };
             let mut record_its = Vec::with_capacity(options.file_count + 2); // make space for iterators for each SSTable + cur_sstable + mem_table
             let mut record_count = if let Some(pd) = prev_data { pd.mem_table.len() as u64 + pd.cur_sstable.record_count() } else { 0 };
 
@@ -593,7 +592,8 @@ impl KVS {
             // compare_swap always returns the "previous" value
             // if a compaction is running (value = true), and try to set to true, won't work and return true, so we have to wait
             // if a compaction isn't running (value = false), and try to set to true, will work and return prev value of false
-            while self.compaction_running.compare_and_swap(false, true, Ordering::Relaxed) == true {
+
+            while self.compaction_running.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
                 debug!("YIELDING PROCESSOR");
                 yield_now(); // yield the CPU so we don't busy wait
             }
@@ -624,7 +624,7 @@ impl KVS {
                 self.prev_data = Arc::new(Some(Data {
                     wal_file: prev_wal_file,
                     mem_table: prev_mem_table,
-                    cur_sstable: cur_sstable,
+                    cur_sstable,
                 }));
 
                 let sstables = self.sstables.clone();
@@ -699,7 +699,7 @@ impl KVS {
 
         debug!("SUM: {}", sum);
 
-        return sum;
+        sum
     }
 
 }
@@ -709,7 +709,7 @@ impl Drop for KVS {
         debug!("KVS Drop");
 
         // check to see if a compaction is running in the background
-        while self.compaction_running.compare_and_swap(false, true, Ordering::Relaxed) == true {
+        while self.compaction_running.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
             debug!("YIELDING PROCESSOR");
             yield_now(); // yield the CPU so we don't busy wait
         }
@@ -722,12 +722,14 @@ impl Drop for KVS {
 
 #[cfg(test)]
 mod tests {
-    use kvs::{KVSOptions, KVS};
     use std::path::PathBuf;
-    use rand::{thread_rng, Rng};
     use std::fs::create_dir;
+    use rand::{thread_rng, Rng};
+    use rand::distributions::Alphanumeric;
     use simple_logger;
-    use ::LOGGER_INIT;
+
+    use crate::kvs::{KVSOptions};
+    use crate::LOGGER_INIT;
 
     const MAX_MEM_COUNT: usize = 100;
     const MAX_FILE_COUNT: usize = 6;
@@ -735,7 +737,7 @@ mod tests {
     fn gen_dir() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
-        let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
+        let tmp_dir: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
         let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
 
         debug!("CREATING TMP DIR: {:?}", ret_dir);
@@ -778,7 +780,7 @@ mod tests {
         let mut kvs = KVSOptions::new(&PathBuf::from(db_dir)).mem_count(MAX_MEM_COUNT).create().unwrap();
 
         for _i in 0..MAX_MEM_COUNT+1 {
-            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let rnd: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
             let key = format!("KEY_{}", rnd).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
 
@@ -883,7 +885,7 @@ mod tests {
 
             // fill half the mem_table, so we're sure we don't flush
             for i in 0..MAX_MEM_COUNT / 2 {
-                let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+                let rnd: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
                 let key = format!("KEY_{}", i).as_bytes().to_vec();
                 let value = rnd.as_bytes().to_vec();
 
@@ -919,7 +921,7 @@ mod tests {
         let mut kvs = KVSOptions::new(&db_dir).mem_count(MAX_MEM_COUNT).file_count(MAX_FILE_COUNT).create().unwrap();
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
-            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let rnd: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
             let key = format!("KEY_{}", i).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
 
@@ -946,7 +948,7 @@ mod tests {
         let mut kvs = KVSOptions::new(&db_dir).mem_count(MAX_MEM_COUNT).file_count(MAX_FILE_COUNT).create().unwrap();
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
-            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let rnd: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
             let key = format!("KEY_{}", i).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
 
@@ -979,7 +981,7 @@ mod tests {
         let mut kvs = KVSOptions::new(&db_dir).mem_count(MAX_MEM_COUNT).file_count(MAX_FILE_COUNT).create().unwrap();
 
         for i in 0..MAX_MEM_COUNT * MAX_FILE_COUNT + 1 {
-            let rnd: String = thread_rng().gen_ascii_chars().take(6).collect();
+            let rnd: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
             let key = format!("KEY_{}", i).as_bytes().to_vec();
             let value = rnd.as_bytes().to_vec();
 

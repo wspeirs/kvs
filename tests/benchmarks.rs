@@ -12,6 +12,7 @@ use rand::{thread_rng, Rng};
 use std::fs::create_dir;
 use simple_logger as sl;
 use log::Level;
+use rand::distributions::Alphanumeric;
 
 fn put(start: u64, end: u64, db: &mut KVS, is_update: bool) {
     let range = start..end;
@@ -30,7 +31,7 @@ fn put(start: u64, end: u64, db: &mut KVS, is_update: bool) {
 
 fn get(start: u64, end: u64, db: &KVS) {
     let range = if start < end {
-        Box::new(start..end) as Box<Iterator<Item=_>>
+        Box::new(start..end) as Box<dyn Iterator<Item=_>>
     } else {
         Box::new((end..start).rev())
     };
@@ -65,7 +66,7 @@ fn benchmarks() {
     sl::init_with_level(Level::Info).unwrap();
 //    sl::init_with_level(Level::Debug).unwrap();
 
-    let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
+    let tmp_dir: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
     let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
 
     println!("CREATING TMP DIR: {:?}", ret_dir);

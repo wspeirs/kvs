@@ -9,14 +9,14 @@ use std::io::{Error as IOError, ErrorKind};
 use std::iter::IntoIterator;
 use std::path::PathBuf;
 
-use record_file::buf2string;
-use record_file::RecordFile;
-use record::Record;
+use crate::record_file::buf2string;
+use crate::record_file::RecordFile;
+use crate::record::Record;
 
-use serde_utils::{serialize_u64_exact, deserialize_u64_exact};
+use crate::serde_utils::{serialize_u64_exact, deserialize_u64_exact};
 
-use U32_SIZE;
-use U64_SIZE;
+use crate::U32_SIZE;
+use crate::U64_SIZE;
 
 const SSTABLE_HEADER: &[u8; 8] = b"DATA\x01\x00\x00\x00";
 
@@ -46,7 +46,7 @@ impl SSTable {
 
         let info = from_slice(&rec_file.last_record().expect("Error reading SSTableInfo")).expect("Error decoding SSTableInfo");
 
-        let sstable = SSTable { rec_file: rec_file, info: info };
+        let sstable = SSTable { rec_file, info };
 
         debug!("Opened SSTable: {:?}", sstable);
 
@@ -77,7 +77,7 @@ impl SSTable {
 
         let mut sstable_info = SSTableInfo {
             record_count: 0,
-            group_count: group_count,
+            group_count,
             indices: vec!(),
             smallest_key: vec!(),
             largest_key: vec!(),
@@ -94,7 +94,7 @@ impl SSTable {
         cur_group_indices_offset = rec_file.append(&record_group_indices_buff)?;
 
         // keep fetching from this iterator
-        while let Some(r) = records.next() {
+        for r in records {
             let rec :&Record = r.borrow();
 
 //            debug!("GOT REC: {:?}", rec);
@@ -105,7 +105,7 @@ impl SSTable {
             }
 
             // take care of our group_indices
-            if sstable_info.record_count != 0 && sstable_info.record_count % group_count as u64 == 0 {
+            if sstable_info.record_count != 0 && sstable_info.record_count % u64::from(group_count) == 0 {
                 // write the current record_group_indices to disk
                 let record_group_indices_buff = serialize_u64_exact(&group_indices);
                 rec_file.write_at(cur_group_indices_offset, &record_group_indices_buff, false)?;
@@ -123,7 +123,7 @@ impl SSTable {
             group_indices[(sstable_info.record_count % group_count as u64) as usize] = loc;
 
             // add to the top-level indices if needed
-            if sstable_info.record_count % group_count as u64 == 0 {
+            if sstable_info.record_count % u64::from(group_count) == 0 {
                 sstable_info.indices.push(loc);
             }
 
@@ -163,7 +163,7 @@ impl SSTable {
 
         // create our SSTable
         let sstable = SSTable {
-            rec_file: rec_file,
+            rec_file,
             info: sstable_info
         };
 
@@ -246,7 +246,7 @@ impl SSTable {
     }
 
     pub fn iter(&self) -> Iter {
-        return Iter {
+        Iter {
             sstable: self,
             cur_record: 0,
             cur_offset: if self.info.record_count == 0 { 0 } else { self.info.indices[0] }
@@ -345,15 +345,18 @@ impl Eq for SSTable { }
 
 #[cfg(test)]
 mod tests {
-    use sstable::SSTable;
-    use record::Record;
     use std::path::PathBuf;
     use std::iter;
-    use rand::{thread_rng, Rng};
     use std::fs::create_dir;
+
+    use rand::{thread_rng, Rng};
+    use rand::distributions::Alphanumeric;
     use simple_logger;
-    use serde_utils::serialize_u64_exact;
-    use ::LOGGER_INIT;
+
+    use crate::sstable::SSTable;
+    use crate::record::Record;
+    use crate::serde_utils::serialize_u64_exact;
+    use crate::LOGGER_INIT;
 
     const BUFFER_SIZE: usize = 4069;
     const CACHE_SIZE: usize = 100;
@@ -362,7 +365,7 @@ mod tests {
     fn gen_dir() -> PathBuf {
         LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
 
-        let tmp_dir: String = thread_rng().gen_ascii_chars().take(6).collect();
+        let tmp_dir: String = thread_rng().sample_iter(Alphanumeric).map(char::from).take(6).collect();
         let ret_dir = PathBuf::from("/tmp").join(format!("kvs_{}", tmp_dir));
 
         debug!("CREATING TMP DIR: {:?}", ret_dir);

@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 
-use U64_SIZE;
+use crate::U64_SIZE;
 
 pub fn serialize_u64_exact(array: &Vec<u64>) -> Vec<u8> {
     let ret = vec![0x00 as u8; array.len() * U64_SIZE];
@@ -12,7 +12,7 @@ pub fn serialize_u64_exact(array: &Vec<u64>) -> Vec<u8> {
         cursor.write_u64::<BE>(*a).expect("Error writing to cursor");
     }
 
-    return cursor.into_inner();
+    cursor.into_inner()
 }
 
 pub fn deserialize_u64_exact(buff: &Vec<u8>) -> Vec<u64> {
@@ -27,13 +27,13 @@ pub fn deserialize_u64_exact(buff: &Vec<u8>) -> Vec<u64> {
         ret.push(cursor.read_u64::<BE>().expect("Error deserializing u64"));
     }
 
-    return ret;
+    ret
 }
 
 
 #[cfg(test)]
 mod tests {
-    use serde_utils::{serialize_u64_exact, deserialize_u64_exact};
+    use crate::serde_utils::{serialize_u64_exact, deserialize_u64_exact};
 
     #[test]
     fn serialize() {
